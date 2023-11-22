@@ -23,6 +23,7 @@ from alpa.pipeline_parallel.primitive_def import (pipeline_p,
 from alpa.util import (clone_jaxpr, clone_jaxpr_eqn, slices_to_jaxpr,
                        OrderedSet, get_var_mapping, maybe_numba_jit,
                        new_jaxpr_eqn)
+from alpa.util import print_jaxpr_computation_graph
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -74,7 +75,9 @@ class AutoLayerOption(LayerOption):
     resulting layers. You can try a few values for this parameters.
     The best choice of this value depends on the number of nodes in your
     cluster and the number of repetitive blocks in your model.
-
+    
+    使用算法自动将 op 分组到 layer 中。参数“layer_num”指定结果层的数量。
+    您可以尝试此参数的几个值。该值的最佳选择取决于集群中的节点数量和模型中重复块的数量。
     Args:
       layer_num: The number of layers to construct.
       remat_mode: Whether to use automatic tensor rematerialization.
@@ -296,28 +299,58 @@ def jaxpr_eqns_input_sizes(jaxpr) -> np.ndarray:
     """
     length = len(jaxpr.eqns)
     input_sizes = np.full((length + 1, length + 1), 0, dtype=np.float32)
-
+    input_vars = list()
+    for i in range(length + 1):
+        row = list()
+        for j in range(length + 1):
+            row.append(list([]))
+        input_vars.append(row)
+    
     outvars = OrderedSet()
+    # 当 k=1 r=3 时, return[1, 3] = 1-th eqn 对 2-th eqn 的输出
     for k in range(0, length + 1):
         if k > 0:
-            outvars = outvars.union(jaxpr.eqns[k - 1].outvars)
+            # print(f"k = {k}")
+            # print(f"{k}-th eqn[{k-1}] inVars: {jaxpr.eqns[k-1].invars}")
+            # print(f"{k}-th eqn[{k-1}]outVars: {jaxpr.eqns[k-1].outvars}")
+            # print(f"{k}-th {jaxpr.eqns[k-1]}")
+            outvars = outvars.union(jaxpr.eqns[k - 1].outvars)      # 0...k-1 的输出中
         invars = OrderedSet()
         total_size = 0
+        total_var = list()   ## 为了研究
         for r in range(k + 1, length + 1):
+            # if k > 0:
+            #     print(f"\tr = {r}")
+            #     print(f"\t{r-1}-th eqn[{r-2}] inVars: {jaxpr.eqns[r-2].invars}")
+            #     print(f"\t{r-1}-th eqn[{r-2}]outVars: {jaxpr.eqns[r-2].outvars}")
+            #     print(f"\t{r-1}-th {jaxpr.eqns[r-2]}")
             for invar in jaxpr.eqns[r - 1].invars:
-                if (isinstance(invar, Var) and invar in outvars and
-                        invar not in invars):
-                    invars.add(invar)
+                if (isinstance(invar, Var) and  # invar 是个变量Var
+                    invar in outvars and        # invar 在 0...k-1 的输出中
+                    invar not in invars):       # invar 不在 invars中
+                    invars.add(invar)               
                     total_size += invar.aval.size * invar.aval.dtype.itemsize
+                    total_var.append(invar)   ## 为了研究
             input_sizes[k, r] = total_size
+            input_vars[k][r] = total_var
+    
+    print(input_sizes.astype(np.int64))
+    for i in range(length + 1):
+        print(f"i={i}",end="\t")
+        for j in range(length + 1):
+            print(input_vars[i][j], end="\t")
+        print()
+    print_jaxpr_computation_graph(jaxpr)
+    
+    
     return input_sizes
 
 
 def get_layer_construction_costs(jaxpr, cost_criteria="flops"):
     """Gets the layer construction cost."""
-    nontrivial = np.array([is_nontrivial(eqn) for eqn in jaxpr.eqns],
-                          dtype=np.int32)
-    input_sizes = jaxpr_eqns_input_sizes(jaxpr)
+    nontrivial = np.array([is_nontrivial(eqn) for eqn in jaxpr.eqns],   # 是有 heavyOP 的 布尔npArray
+                          dtype=np.int32)                               # 包括 dot_general, conv_general_dilated
+    input_sizes = jaxpr_eqns_input_sizes(jaxpr)   #??????
     if cost_criteria == "flops":
         compute_costs = np.array([
             eqn_flops(eqn) if nt else 0
@@ -340,11 +373,15 @@ def get_layer_construction_costs(jaxpr, cost_criteria="flops"):
 
 
 def cluster_jaxpr_by_cost(jaxpr: Jaxpr, layer_num: int, eps: float, costs,
-                          cost_criteria):
+                          cost_criteria):  
     """Clusters the jaxpr by cost."""
     layer_num = int(layer_num)
     length = len(jaxpr.eqns)
-    non_trivial, input_sizes, compute_costs = costs
+    
+    (non_trivial, 
+     input_sizes, 
+     compute_costs) = costs # input_size!?? 深更半夜猜测含义：c(x,y) x层的值对(y-1)层构成依赖
+    
     compute_costs_avg = compute_costs.sum() / layer_num
     if cost_criteria in ("flops", "input_memory"):
         compute_costs_bound = compute_costs_avg * (1 + eps)
@@ -366,11 +403,11 @@ def cluster_jaxpr_by_cost(jaxpr: Jaxpr, layer_num: int, eps: float, costs,
         for left in range(1, length + 1):
             cnt = 0
             total_compute_cost = 0
-            for r in range(left, length + 1):
-                if non_trivial[r - 1]:
+            for r in range(left, length + 1):  # left,r 对应 left, r-1
+                if non_trivial[r - 1]:         # 若是 heavy_op
                     cnt += 1
                     total_compute_cost += compute_costs[r - 1]
-                if cnt < layer_heavy_op_lower_bound:
+                if cnt < layer_heavy_op_lower_bound:                # 若
                     if total_compute_cost >= compute_costs_bound:
                         blocked[left, r] = 0
                     continue
@@ -383,13 +420,13 @@ def cluster_jaxpr_by_cost(jaxpr: Jaxpr, layer_num: int, eps: float, costs,
 
     @maybe_numba_jit
     def dp(input_sizes, blocked):
-        max_cost = np.full((length + 1, layer_num + 1),
+        max_cost = np.full((length + 1, layer_num + 1),             # max_cost: 等价于 paper 中的 G函数
                            np.inf,
-                           dtype=np.float32)
+                           dtype=np.float32)                
         sum_cost_under_max = np.full((length + 1, layer_num + 1),
                                      np.inf,
                                      dtype=np.float32)
-        max_cost_argmin = np.full((length + 1, layer_num + 1),
+        max_cost_argmin = np.full((length + 1, layer_num + 1),      # 使max_cost 最小的k？
                                   -1,
                                   dtype=np.int32)
         solution_imbalance = np.full((length + 1, layer_num + 1),
@@ -397,21 +434,21 @@ def cluster_jaxpr_by_cost(jaxpr: Jaxpr, layer_num: int, eps: float, costs,
                                      dtype=np.float32)
         max_cost[0, 0] = 0
         sum_cost_under_max[0, 0] = 0
-        # Currently use variance to measure imbalance
+        # Currently use variance to measure imbalance 当前使用方差来衡量不平衡
         for r in range(0, length + 1):
             solution_imbalance[r, 0] = 0
-
-        for q in range(1, layer_num + 1):
+        # paper G(k, r) = min(i is 1....k)[max(G(i-1, r-1), C(i,k))] 
+        for q in range(1, layer_num + 1):   # code G(q, r) = min(k is 0...r-1)max{G(k, q-1), blocked[k_1, r]+inputsize[k, r] }
             for r in range(1, length + 1):
-                for k in range(0, r):
+                for k in range(0, r):                                           # q->r, r->k, k->i-1
                     new_value = max(max_cost[k, q - 1],
                                     blocked[k + 1, r] + input_sizes[k, r])
                     new_sum = (sum_cost_under_max[k, q - 1] +
                                blocked[k + 1, r] + input_sizes[k, r])
                     new_imbalance = (solution_imbalance[k, q - 1] + k**2 / q -
-                                     r**2 / (q + 1) + (r - k)**2)
-                    if (new_value < max_cost[r, q] or
-                        (new_value <= max_cost[r, q] * (1 + 1e-4) and
+                                     r**2 / (q + 1) + (r - k)**2)       
+                    if (new_value < max_cost[r, q] or                                           # 【new_value的k, 是使得当前 G(r, q) 最小的k】  (or)   【 新的k 使得 G(r, q) 与老的k之间相差很小  (and) 「」
+                        (new_value <= max_cost[r, q] * (1 + 1e-4) and                           #    ⬆️ 只要是最小G(r, q) 则一定更新                   【        
                          (new_sum < sum_cost_under_max[r, q] or
                           (new_sum <= sum_cost_under_max[r, q] * (1 + 1e-4) and
                            new_imbalance < solution_imbalance[r, q])))):
@@ -658,6 +695,7 @@ def automatic_layer_construction(fun: Callable = None,
     """Automatically cluster the equations in a jaxpr into layers.
     Automatically cluster the equations in a jaxpr into layers and add pipeline
     markers at layer boundaries.
+    自动将 jaxpr 中的 equations 聚类为 layers, 并在层边界添加 pipeline markers。 
     Args:
         fun: the input function.
         static_argnums: An optional int or collection of ints that specify

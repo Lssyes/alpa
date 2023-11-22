@@ -43,7 +43,19 @@ from alpa.util import (get_var_mapping, trace_jaxpr_with_micro_batch,
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
+def print_jaxpr_computation_graph(jaxpr_for_print):
+    print("\nbatch jaxpr\n-=-=-==-=-==-==--=-=-==-=-==-==--=-=-==-=-==-==--=-=-==-=-==-==-")
+    # print("-> in_avals:")
+    # for idx, in_aval in enumerate(jaxpr_for_print.in_avals):
+    #     print(f"{jaxpr_for_print.jaxpr.invars[idx]}:  {in_aval}")
+    for idx in range(len(jaxpr_for_print.eqns)):
+        print(">",idx , "\t", jaxpr_for_print.eqns[idx], 
+            f"\t\033[33minvar:{jaxpr_for_print.eqns[idx].invars}",
+            f"outvar:{jaxpr_for_print.eqns[idx].outvars}]\033[0m")
+    # print("-> out_avals:")
+    # for idx, out_aval in enumerate(jaxpr_for_print.out_avals):
+    #     print(f"{jaxpr_for_print.jaxpr.outvars[idx]}:  {out_aval}")
+    print()
 
 def compile_pipeshard_executable(
         fun: lu.WrappedFun, in_tree: PyTreeDef,
@@ -62,12 +74,9 @@ def compile_pipeshard_executable(
 
     Args:
         fun: The function to be parallelized.
-        global_input_shardings: Forcibly set sharding specs of global
-          input vars.
-        stage_input_shardings: Forcibly set sharding specs of input vars of
-          each stage.
-        manual_sharding_options: pjit style sharding constraints of global input
-          vars.
+        global_input_shardings: 强制设置 全局input vars 的 Sharding Specs.
+        stage_input_shardings: 强制设置 每个阶段的input vars 的 Sharding Spec.
+        manual_sharding_options: pjit风格的 全局input vars 的 sharding constraints.
     """
     if global_config.backend == "tpu":
         raise NotImplementedError("Pipeshard Parallel for tpu is not supported")
@@ -75,31 +84,38 @@ def compile_pipeshard_executable(
     name_base = f"{fun.__name__}_pipeshard_parallel"
 
     # Apply layer construction to add pipeline markers.
+    # !!!! 应用 <<< Layer construction >>> 以添加 """pipeline markers"""。 
+    # 这一步做的是根据 alpa.AutoLayerOption(layer_num=4) 来进行聚类 !???
     with GradFuncTransformContext(layer_option.transform):
         if pipeline_schedule == "inference":
             f_backup = fun.f
             fun.f = layer_option.transform(fun.f)
 
         # Trace the function with a micro batch to get the jaxpr.
-        closed_jaxpr, micro_batch_size = trace_jaxpr_with_micro_batch(
-            fun, batch_invars, num_microbatch, avals)
+        # 很重要的步骤 microbatch
+        closed_jaxpr, micro_batch_size = trace_jaxpr_with_micro_batch(fun, batch_invars, num_microbatch, avals)
 
         # Trace again with a full batch.
         # The full batch is used to derive the reduction operator across
         # micro batches (e.g., addition, concatenation).
+        # full batch 用于 cross microbatch 推导reduction算子（如 addtion concatenation)
         if num_microbatch > 1:
             for store in fun.stores:
                 if store:
                     store.reset()
-            full_batch_closed_jaxpr, _ = trace_jaxpr_with_micro_batch(
-                fun, batch_invars, 1, avals)
+            # 很重要的步骤 fullbatch
+            full_batch_closed_jaxpr, _ = trace_jaxpr_with_micro_batch(fun, batch_invars, 1, avals)
         else:
             full_batch_closed_jaxpr = None
 
         if pipeline_schedule == "inference":
             fun.f = f_backup
     debug_compilation_time("trace")
-
+    
+    
+    print_jaxpr_computation_graph(full_batch_closed_jaxpr)
+    # print_jaxpr_computation_graph(closed_jaxpr)
+    
     # flatten manual sharding axis resources
     out_tree = out_tree_thunk()
     if manual_shard_options is not None:
@@ -151,16 +167,17 @@ def compile_pipeshard_executable_internal(
     gensym_func = gensym([closed_jaxpr.jaxpr])
     inference_mode = (pipeline_schedule == "inference")
 
-    (closed_jaxpr, global_outvars, jax_pipeline_layers, apply_grad_jaxpr,
-     microbatch_bound, reduction_vector, post_microbatch_bound,
+    (closed_jaxpr, global_outvars, jax_pipeline_layers, apply_grad_jaxpr,           # jax_pipeline_layers: 前向/后向 的 pipeline
+     microbatch_bound, reduction_vector, post_microbatch_bound,                     # apply_grad_jaxpr: update参数
      accumulator_mapping, acc_grad_invars,
-     acc_grad_outvars) = (split_and_process_layers(closed_jaxpr,
-                                                   full_batch_closed_jaxpr,
+     acc_grad_outvars) = (split_and_process_layers(closed_jaxpr,                    # 这里把计算图划分成了，compute_grad 和 apply_grad
+                                                   full_batch_closed_jaxpr,         # p.s. 划分出来的版本是 micro_batch 的
                                                    num_microbatch,
                                                    inference_mode, gensym_func))
 
     debug_compilation_time("jaxpr operations")
 
+    # 将 apply_grad 按照 stage_construction，进行切分
     (jax_apply_layers,
      apply_grad_global_info) = slice_apply_grad_for_stage_construction(
          jax_pipeline_layers, apply_grad_jaxpr, microbatch_bound, global_invars,
@@ -168,8 +185,11 @@ def compile_pipeshard_executable_internal(
          inference_mode)
 
     # Construct pipeline stages by merging layers
-    (jax_pipeline_stages, stage_to_mesh, sliced_virtual_meshes,
-     manual_stage_option) = cluster_layers_and_slice_mesh(
+    # 这里对已经进行了layer聚类的layers 进行了inter-op pass】
+    # 它将不同的 pipeline layer 聚类为 pipeline stage，将表示为2D DeviceMesh 的计算集群划分为许多SubMesh，
+    # 并为每个 stage 分配一个Submesh。现在，forward层 及其对应的 backward层 将位于同一Submesh上。请参阅Alpa论文中的全自动算法
+    (jax_pipeline_stages, stage_to_mesh, sliced_virtual_meshes,         
+     manual_stage_option) = cluster_layers_and_slice_mesh(                  # 当 manual 划分stage的时候, 此函数无作用
          jax_pipeline_layers, virtual_mesh, accumulator_mapping,
          acc_grad_invars, acc_grad_outvars, num_microbatch, micro_batch_size,
          jax_apply_layers, apply_grad_global_info, pipeline_schedule,
@@ -178,6 +198,7 @@ def compile_pipeshard_executable_internal(
     debug_compilation_time("stage construction")
 
     # Process apply_gradient and donation
+    # 将单个apply_grad JAXPR拆分为多个 Submesh 部分，每个部分处理与特定 Submesh 上的变量相关的梯度更新和优化器状态。
     num_devices = [vmesh.num_devices for vmesh in sliced_virtual_meshes]
     (sliced_apply_grad_stages, apply_grad_placement,
      global_outvars, allreduce_groups) = process_apply_gradient(
@@ -186,6 +207,7 @@ def compile_pipeshard_executable_internal(
          False, num_devices)
     jax_all_stages = jax_pipeline_stages + sliced_apply_grad_stages
 
+    # 为每个管道阶段处理 denoted invar，并添加 denoted invar以进行梯度累积。
     donation_mapping = create_donation_mapping(accumulator_mapping,
                                                donated_invars, global_invars,
                                                global_outvars)
@@ -279,44 +301,61 @@ def compile_pipeshard_executable_internal(
 
 def split_and_process_layers(closed_jaxpr, full_batch_closed_jaxpr,
                              num_microbatch, inference_mode, gensym_func):
-    """Split and process the input jaxpr with the following steps:
-
-    1. Split the jaxpr into the compute grad part and the apply grad part.
-    2. Transform the compute grad jaxpr to a accumulate grad jaxpr.
-    3. Split the accumulate grad jaxpr into forward and backward pipeline
-       layers.
-    4. Divide the accumulated gradient by the number of microbatches at the
-       start of accumulate gradient.
+    """使用以下步骤拆分和处理输入jaxpr:
+    
+    1. 将jaxpr拆分为 compute grad 部分和 apply grad 部分
+    2. 将计算 grad jaxpr 转换为 accumulate grad jaxpr
+    3. 将 accumulate grad jaxpr 拆分为 forward 和 backward pipeline layer
+    4. 将 accumulated gradient 除以 acc_grad 开始时的 microbatch 的数量(不是size)
 
     """
 
     # Split the jaxpr into compute_grad and apply_grad
-    (closed_jaxpr, compute_grad_jaxpr, apply_grad_jaxpr,
-     microbatch_bound) = split_compute_grad_and_apply_grad(
-         closed_jaxpr, gensym_func, num_microbatch, inference_mode)
+    (closed_jaxpr, 
+     compute_grad_jaxpr, 
+     apply_grad_jaxpr, 
+     microbatch_bound) = split_compute_grad_and_apply_grad(closed_jaxpr, 
+                                                           gensym_func, 
+                                                           num_microbatch, 
+                                                           inference_mode)
     global_outvars = closed_jaxpr.jaxpr.outvars
-
+    # print("compute_grad_jaxpr")
+    # print_jaxpr_computation_graph(compute_grad_jaxpr)
+    # print("apply_grad_jaxpr")
+    # print_jaxpr_computation_graph(apply_grad_jaxpr)
+    
+    
     # Transform compute_grad to accumulate_grad
+    # 将原来仅计算梯度的compute_grad JAXPR ， 转换为执行梯度累积的accumulate_grad JAXPR。
     # FIXME(yonghao): use apply grad jaxpr returned by this function
-    (reduction_vector, post_microbatch_bound,
-     _) = _get_full_batch_apply_grad(full_batch_closed_jaxpr, microbatch_bound,
-                                     num_microbatch, inference_mode)
-    (acc_grad_jaxpr, microbatch_bound,
-     accumulator_mapping) = compute_grad_to_accumulate_grad(
-         compute_grad_jaxpr, microbatch_bound, reduction_vector, gensym_func,
-         num_microbatch)
+    (reduction_vector, post_microbatch_bound, _) = _get_full_batch_apply_grad(full_batch_closed_jaxpr, 
+                                                                              microbatch_bound,
+                                                                              num_microbatch, 
+                                                                              inference_mode)
+    (acc_grad_jaxpr, microbatch_bound, accumulator_mapping) = compute_grad_to_accumulate_grad(compute_grad_jaxpr, 
+                                                                                              microbatch_bound, 
+                                                                                              reduction_vector, 
+                                                                                              gensym_func,
+                                                                                              num_microbatch)
 
-    # Slice the jaxpr into layers
+    
     acc_grad_invars = acc_grad_jaxpr.jaxpr.invars
     acc_grad_outvars = acc_grad_jaxpr.jaxpr.outvars
-
-    jax_pipeline_layers = slice_closed_jaxpr_by_full_pipeline_marks(
-        acc_grad_jaxpr)
+    # print("acc_grad_jaxpr")
+    # print_jaxpr_computation_graph(acc_grad_jaxpr)
+    
+    # Slice the jaxpr into layers
+    # 将 accumulate_grad JAXPR 切片为多个 pipeline layer
+    jax_pipeline_layers = slice_closed_jaxpr_by_full_pipeline_marks(acc_grad_jaxpr)
     if not inference_mode:
-        jax_pipeline_layers = (
-            mark_missing_vars_in_backward_computation_pipeline_marks(
-                jax_pipeline_layers, acc_grad_invars, acc_grad_outvars,
-                gensym_func))
+        # 当 JAX 派生 backward JAXPR 时，backward layer 将直接使用 forward layer 的中间结果，而不是
+        # 将其添加到 backward layer’s start pipeline marker。此函数可解决此问题。此外，它还删除了 
+        # start  marker 中的所有 Literal 和end marker中的所有 DropVar。
+        jax_pipeline_layers = (mark_missing_vars_in_backward_computation_pipeline_marks(jax_pipeline_layers, 
+                                                                                        acc_grad_invars, 
+                                                                                        acc_grad_outvars,
+                                                                                        gensym_func))
+        
     # TODO(yonghao): remove this pass. we can clear these vars when rewriting
     #   compute grad to accumulate grad
     jax_pipeline_layers = pipeline_dce(jax_pipeline_layers, acc_grad_outvars)
@@ -324,9 +363,9 @@ def split_and_process_layers(closed_jaxpr, full_batch_closed_jaxpr,
     # Add compute mean and slice apply-grad stages
     # FIXME (zhuohan): get_mean only works when we use jax.mean to
     #                  calculate loss. It will fail if we use sum.
-    apply_grad_jaxpr, global_outvars = apply_grad_get_mean(
-        apply_grad_jaxpr, global_outvars, microbatch_bound.outvars, gensym_func,
-        num_microbatch, reduction_vector)
+    apply_grad_jaxpr, global_outvars = apply_grad_get_mean(apply_grad_jaxpr, global_outvars, 
+                                                           microbatch_bound.outvars, gensym_func,
+                                                           num_microbatch, reduction_vector)
 
     return (closed_jaxpr, global_outvars, jax_pipeline_layers, apply_grad_jaxpr,
             microbatch_bound, reduction_vector, post_microbatch_bound,
@@ -540,11 +579,11 @@ def slice_apply_grad_for_stage_construction(pipeline_layers, apply_grad_jaxpr,
         num_mesh = num_layers // 2
         layer_to_mesh = (list(range(num_mesh)) +
                          list(reversed(range(num_mesh))))
-    (layers, apply_grad_placement, global_outvars,
-     _) = process_apply_gradient(apply_grad_jaxpr, microbatch_bound,
-                                 pipeline_layers, layer_to_mesh, gensym_func,
-                                 num_mesh, global_invars, global_outvars,
-                                 donated_invars, True, None)
+    (layers, apply_grad_placement, 
+     global_outvars,_) = process_apply_gradient(apply_grad_jaxpr, microbatch_bound,
+                                                pipeline_layers, layer_to_mesh, gensym_func,
+                                                num_mesh, global_invars, global_outvars,
+                                                donated_invars, True, None)
     apply_grad_donation = create_donation_mapping(accumulator_mapping,
                                                   donated_invars, global_invars,
                                                   global_outvars)

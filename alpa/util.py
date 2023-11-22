@@ -117,8 +117,7 @@ def update_jax_platform(platform):
 
 class GradFuncTransformContext:
     """
-    A context to hold transformations applied to the forward function
-    before calling alpa.grad or alpa.value_and_grad.
+    在调用 alpa.grad 或 alpa.value_and_grad 之前, 用于保存应用于 forward 函数的转换的。
     """
     transforms = []
 
@@ -870,7 +869,7 @@ def trace_jaxpr_with_micro_batch(fun: lu.WrappedFun,
                                  num_micro_batches: int,
                                  raw_avals: Sequence[AbstractValue],
                                  batch_dim: int = 0):
-    """Trace the jaxpr of the computation of a micro batch."""
+    """Trace the jaxpr of the computation of a micro batch. 跟踪 microbatch计算的 jaxpr"""
     assert batch_dim == 0, "Only support batch_dim == 0"
     # Monkey patch jax.random to fast stateful version
     monkey_patch_random()
@@ -878,23 +877,23 @@ def trace_jaxpr_with_micro_batch(fun: lu.WrappedFun,
 
     avals = []
     batch_size = None
-    for aval, is_batch_var in zip(raw_avals, batch_invars):
-        if is_batch_var:
-            assert aval.shape[0] % num_micro_batches == 0, (
-                f"The batch size must be divisable by num_micro_batches. "
+    for aval, is_batch_var in zip(raw_avals, batch_invars):         # zip(输入, 是否为xy)
+        if is_batch_var:                                                        # 如果 改aval 是x或y
+            assert aval.shape[0] % num_micro_batches == 0, (                                # 则要求aval的第一个dim(batchdim)
+                f"The batch size must be divisable by num_micro_batches. "                  # 必须可以整除 micro_batch 的数量
                 f"batch_size = {aval.shape[0]}, "
                 f"num_micro_batches = {num_micro_batches}")
-            if batch_size is None:
-                batch_size = aval.shape[0] // num_micro_batches
-            else:
+            if batch_size is None:                                                          # 这里batchsize 是 microbatchsize
+                batch_size = aval.shape[0] // num_micro_batches                             # 求出 microbatchsize
+            else:   
                 assert batch_size == aval.shape[0] // num_micro_batches, (
                     "The batch dimension must be the same for all batch vars.")
-            shape = (batch_size,) + aval.shape[1:]
-            avals.append(aval.update(shape=shape))
-        else:
-            avals.append(aval)
+            shape = (batch_size,) + aval.shape[1:]                                          # 求出新的 ShapedArray 的 shape                   
+            avals.append(aval.update(shape=shape))                                          # 注意这里 aval.update 的方法 !!!+=+=!!!
+        else:                                                                   # 否则 直接将 aval 原封不动的放过
+            avals.append(aval)                                                              # 因为这些aval是 w b这类参数, 不会因batchsize而改变  
     with jax.disable_jit():
-        jaxpr, _, consts = pe.trace_to_jaxpr_final(fun, avals)
+        jaxpr, _, consts = pe.trace_to_jaxpr_final(fun, avals)                  # 很关键！！怎么就突然有了pipeline mark？？？
     closed_jaxpr = ClosedJaxpr(jaxpr, consts)
 
     # Restore jax.random to original stateless version
@@ -1712,3 +1711,22 @@ def mesh_ids_hash(mesh_ids):
     for i in sorted(mesh_ids):
         ret += bytes(f"{i}", "utf-8") + b"$"
     return ret
+
+
+def print_jaxpr_computation_graph(jaxpr_for_print):
+    print("\nPrint Jaxpr\n-=-=-==-=-==-==--=-=-==-=-==-==--=-=-==-=-==-==--=-=-==-=-==-==-")
+    # print("-> in_avals:")
+    # for idx, in_aval in enumerate(jaxpr_for_print.in_avals):
+    #     print(f"{jaxpr_for_print.jaxpr.invars[idx]}:  {in_aval}")
+    for idx in range(len(jaxpr_for_print.eqns)):
+        print(f"> {idx+1}-th", end="")
+        for eqn_line in str(jaxpr_for_print.eqns[idx]).split('\n'):
+            print("\t", eqn_line)
+        
+        print(f"\t\033[33minvar:{jaxpr_for_print.eqns[idx].invars}\033[0m")
+        print(f"\t\033[33moutvar:{jaxpr_for_print.eqns[idx].outvars}]\033[0m")
+        print("\t---------------")
+    # print("-> out_avals:")
+    # for idx, out_aval in enumerate(jaxpr_for_print.out_avals):
+    #     print(f"{jaxpr_for_print.jaxpr.outvars[idx]}:  {out_aval}")
+    print()

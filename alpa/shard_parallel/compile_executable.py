@@ -97,24 +97,23 @@ def shard_parallel_internal(
         as_option: AutoShardingOption, ms_option: ManualShardingOption,
         *avals: Sequence[AbstractValue]):
     """
-    Compile an executable with auto-sharding pass.
+    使用 auto-sharding pass 编译可执行文件
 
     Args:
-      fun: The wrapped jax function to be compiled.
-      in_tree: The pytree of input arguments.
-      out_tree_thunk: The thunk to produce output pytree.
-      donated_invars: Whether to donate input parameters.
-      physical_mesh: The physical device mesh.
-      logical_mesh_choices: The candidates of logical mesh shape.
-        If there is only one choice, use the given one. If there are multiple
-        choices, we will try all of them and pick the best.
-      as_option: The options of auto-sharding solver.
-      avals: The input abstract values.
+      fun:                  要编译的包装的 jax 函数.
+      in_tree:              输入参数的 pytree.
+      out_tree_thunk:       生成输出 pytree 的 thunk.
+      donated_invars:       是否 denote 输入参数.
+      physical_mesh:        物理 DeviceMesh.
+      logical_mesh_choices: 逻辑 DeviceMesh 形状的候选者.
+            如果只有一种选择，请使用给定的一种。如果有多个选择，我们会尝试所有选项并选择最好的。
+      as_option:            Auto-sharding solver的选项。
+      avals:                输入抽象值.
     """
     # pylint: disable=unused-argument
     # Trace to get jaxpr
-    closed_jaxpr, _ = trace_jaxpr_with_micro_batch(fun, [False] * len(avals), 1,
-                                                   avals)
+    closed_jaxpr, _ = trace_jaxpr_with_micro_batch(fun, [False] * len(avals), 1, avals)
+    
     out_avals = [v.aval for v in closed_jaxpr.jaxpr.outvars]
 
     # Convert jaxpr to XLA HLO
@@ -134,10 +133,19 @@ def shard_parallel_internal(
             hlo.set_output_shardings(out_sharding_proto)
             hlo.is_manually_annotated = True
     flop_count = xe.hlo_module_count_flop_dot_conv_only(hlo.get_module())
-
-    # Compile a XLA executable
-    hlo, stage_plan = run_auto_sharding_pass(hlo, logical_mesh_choices[0],
-                                             "single", 1, as_option)
+    
+    # print 一下 hlo 的计算图
+    computation = hlo.get_computation()
+    hlo_proto = hlo.get_hlo_proto()
+    # print(computation.as_hlo_dot_graph())
+    # print(computation.as_hlo_text())
+    # Compile a XLA executable #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    hlo, stage_plan = run_auto_sharding_pass(hlo, 
+                                             logical_mesh_choices[0], 
+                                             "single", 
+                                             1, 
+                                             as_option)
+    
     # This is a walkaround because XLA GpuCompiler has some issue
     if global_config.backend == "gpu":
         hlo = run_spmd_partitioner_pass(hlo,

@@ -527,7 +527,7 @@ def get_all_submesh_autosharding_config_choices(virtual_mesh, submesh_choices,
 
 
 def get_sliced_virtual_submeshes(virtual_mesh, submesh_shapes):
-    """Slice the origin mesh into submeshes given submesh shapes."""
+    """Slice the origin mesh into submeshes given submesh shapes.将原始 Mesh 切片为给定 Submesh形状 的 Submesh."""
     num_hosts = virtual_mesh.num_hosts
     num_devices_per_host = virtual_mesh.num_devices_per_host
     submesh_sizes = [np.prod(submesh) for submesh in submesh_shapes]
@@ -536,34 +536,31 @@ def get_sliced_virtual_submeshes(virtual_mesh, submesh_shapes):
     sorted_submesh_indices = np.argsort(submesh_sizes, kind="stable")
     current_host_id = 0
     current_device_id = 0
-    for i in reversed(sorted_submesh_indices):
-        required_num_hosts, required_num_devices = submesh_shapes[i]
-        if required_num_devices == num_devices_per_host:
-            assert current_device_id == 0
-            assert current_host_id + required_num_hosts <= num_hosts, (
-                "Do not have enough hosts for the solution.")
-            virtual_submeshes[i] = virtual_mesh.slice_2d(
-                tuple(
-                    range(current_host_id,
-                          current_host_id + required_num_hosts)),
-                (tuple(range(num_devices_per_host)),) * required_num_hosts)
+    for i in reversed(sorted_submesh_indices): # 按size 从小到大遍历所有 submesh
+        required_num_hosts, required_num_devices = submesh_shapes[i]                        # (需要的host数量, 需要的device数量)
+        if required_num_devices == num_devices_per_host:                                    # 如果 device == 每个host的device, 分配选择2的submesh
+            assert current_device_id == 0                                                   #          当前device_id 必须为 0            
+            assert current_host_id + required_num_hosts <= num_hosts, (                     #          当前host + 需要的host数量 <= host总数
+                "Do not have enough hosts for the solution.")                               #                   否则, 就报错没有足够host来做solution
+            virtual_submeshes[i] = virtual_mesh.slice_2d(                                   #          根据 virtual_mesh 生成 切分的 virtual_submeshes    
+                tuple(range(current_host_id, current_host_id + required_num_hosts)),        #          新生成的 vitural_submesh 根据给定参数 host_indices
+                (tuple(range(num_devices_per_host)),) * required_num_hosts)                 #                                           device_indices
             current_host_id += required_num_hosts
         else:
-            assert required_num_hosts == 1
-            assert required_num_devices < num_devices_per_host
-            assert (current_device_id + required_num_devices <=
-                    num_devices_per_host), (
-                        "Do not have enough devices in a host for the solution")
-            virtual_submeshes[i] = virtual_mesh.slice_2d([current_host_id], [
-                tuple(
-                    range(current_device_id,
-                          current_device_id + required_num_devices))
-            ])
-            current_device_id += required_num_devices
-            if current_device_id == num_devices_per_host:
+            assert required_num_hosts == 1                                                  # 否则 分配 选择1 (1, 2^m) 的Submesh，如果submesh不是同构 则先运行else再运行if
+            assert required_num_devices < num_devices_per_host                              #       host数量必须是1
+            assert (current_device_id + required_num_devices <=  num_devices_per_host), (   #       当前device_id+需要的device数量, 不能超过每个host的device数量
+                        "Do not have enough devices in a host for the solution")            #!!!品!!! 因为经过了从小到大排序, 和paper证明, 如果按照全自动算法的分配方式一定会有结果 
+            virtual_submeshes[i] = virtual_mesh.slice_2d(
+                [current_host_id], 
+                [tuple(range(current_device_id,
+                             current_device_id + required_num_devices))]
+            )
+            current_device_id += required_num_devices                           # 操作 device host 指针
+            if current_device_id == num_devices_per_host:   
                 current_host_id += 1
                 current_device_id = 0
-    assert current_host_id == num_hosts
+    assert current_host_id == num_hosts             # 所有设备必须 都分配完毕
     assert current_device_id == 0
     return virtual_submeshes
 
@@ -583,6 +580,9 @@ def cluster_layers_and_slice_mesh(
     mesh into multiple submeshes, and assign the stages to the submeshes.
     We first profile the compute cost of layers on different choices
     of submeshes and find the optimal solution with DP.
+    此函数将 pipeline layer 聚集成多个stage, 将 DeivceMesh 切成多个 Submesh,
+    并将 Stage 分配给 Submesh。我们首先分析了 在不同的 Submesh 上的层 的计算成本,
+    然后使用 DP 找到最佳解决方案。
 
     Args:
         layers: All the layers.
@@ -600,7 +600,7 @@ def cluster_layers_and_slice_mesh(
     """
     timers("stage-construction").start()
 
-    inference_mode = (pipeline_schedule == "inference")
+    inference_mode = (pipeline_schedule == "inference") # 是否是推理模式
     if virtual_mesh.launched_physical_mesh_group is None:
         given_mesh = False
     else:
@@ -624,7 +624,7 @@ def cluster_layers_and_slice_mesh(
             virtual_mesh.num_hosts, virtual_mesh.num_devices_per_host,
             stage_option.submesh_physical_shape_space,
             stage_option.manually_specified_submeshes)
-        autosharding_configs = get_all_submesh_autosharding_config_choices(
+        autosharding_configs = get_all_submesh_autosharding_config_choices(         # 获取所有 submesh 的 autosharding_config "choises"??
             virtual_mesh, submesh_choices,
             stage_option.submesh_logical_shape_space, batch_size)
         num_autosharding_configs = len(autosharding_configs[0])
@@ -685,29 +685,26 @@ def cluster_layers_and_slice_mesh(
             for layer_id in stage_layer_ids:
                 assert layer_id == last_layer_id
                 last_layer_id += 1
-        assert last_layer_id == num_layers, (
-            f"{last_layer_id} layers in stage option, but {num_layers} marked")
+        assert last_layer_id == num_layers, (f"{last_layer_id} layers in stage option, but {num_layers} marked")
         submesh_shapes = stage_option.submesh_physical_shapes
-        logical_mesh_shapes = (stage_option.submesh_logical_shapes or
-                               submesh_shapes)
-        autosharding_option_dicts = (
-            stage_option.submesh_autosharding_option_dicts)
+        logical_mesh_shapes = (stage_option.submesh_logical_shapes or submesh_shapes)
+        autosharding_option_dicts = (stage_option.submesh_autosharding_option_dicts)
     elif isinstance(stage_option, UniformStageOption):
+        # 本 MLP 手动划分例子, 走的Uniform 这个分枝
         num_stages = stage_option.num_stages or num_layers
         if stage_option.submesh_physical_shape is not None:
             assert stage_option.submesh_logical_shape is not None
             submesh_logical_shape = stage_option.submesh_logical_shape
             submesh_shapes = [stage_option.submesh_physical_shape] * num_stages
             logical_mesh_shapes = [submesh_logical_shape] * num_stages
-            assert virtual_mesh.num_devices == np.prod(
-                submesh_logical_shape) * num_stages
-            forward_stage_layer_ids = _cluster_layers_with_even_tflops(
-                layers[:num_layers], num_stages)
+            assert virtual_mesh.num_devices == np.prod(submesh_logical_shape) * num_stages
+            forward_stage_layer_ids = _cluster_layers_with_even_tflops(layers[:num_layers], num_stages)
             autosharding_option = stage_option.submesh_autosharding_option
             if autosharding_option is None:
                 autosharding_option = {}
             autosharding_option_dicts = [autosharding_option] * num_stages
         else:
+            # 本 MLP 手动划分例子,  未提供 submesh 的物理shape
             if given_mesh:
                 submesh_shapes = [
                     x.shape
@@ -715,34 +712,32 @@ def cluster_layers_and_slice_mesh(
                 ]
                 logical_mesh_shapes = submesh_shapes
             else:
+                # 本 MLP 手动划分例子,  未 given_mesh
                 num_devices = virtual_mesh.num_devices
 
-                assert num_devices >= num_stages, "No enough devices"
-                assert num_devices % num_stages == 0
-                num_devices_per_mesh = num_devices // num_stages
-                if num_devices_per_mesh > virtual_mesh.num_devices_per_host:
-                    assert (num_devices_per_mesh %
-                            virtual_mesh.num_devices_per_host == 0)
-                    submesh_shape = (num_devices_per_mesh //
-                                     virtual_mesh.num_devices_per_host,
-                                     virtual_mesh.num_devices_per_host)
-                else:
-                    assert (virtual_mesh.num_devices_per_host %
-                            num_devices_per_mesh == 0)
-                    submesh_shape = (1, num_devices_per_mesh)
-                submesh_shapes = [submesh_shape] * num_stages
-                logical_mesh_shapes = [submesh_shape] * num_stages
+                assert num_devices >= num_stages, "No enough devices"   # 要求 device数量 > stage数量
+                assert num_devices % num_stages == 0                    # 要求 device数量 可以整除 stage数量
+                num_devices_per_mesh = num_devices // num_stages        # 计算 每个Mesh分配的 device数量
+                if num_devices_per_mesh > virtual_mesh.num_devices_per_host:    # 如果 每个Mesh的Device数量 > 每个node的device ********
+                    assert (num_devices_per_mesh % virtual_mesh.num_devices_per_host == 0)  # 则要求 前者能整除后者
+                    submesh_shape = (num_devices_per_mesh //                    #             子网的形状 -> 横向占用一个node的所有device
+                                     virtual_mesh.num_devices_per_host,         #                       -> 纵向根据 每个mesh的device数量
+                                     virtual_mesh.num_devices_per_host)         #                       -> 选择2 (n, M) 行满
+                else:               
+                    assert (virtual_mesh.num_devices_per_host %                 # 否则:        
+                            num_devices_per_mesh == 0)                          #           每个 node的device数量 必须整除 每个Mesh的Device
+                    submesh_shape = (1, num_devices_per_mesh)                   #           子网形状 -> 选择1 (1, 2^n)
+                submesh_shapes = [submesh_shape] * num_stages                   # 同构 Submesh ???????  [(1,2),(1,2)]
+                logical_mesh_shapes = [submesh_shape] * num_stages              # 逻辑mesh形状 与上值相同
 
-            forward_stage_layer_ids = [[i] for i in range(num_layers)]
+            forward_stage_layer_ids = [[i] for i in range(num_layers)]          # [[0], [1]]
             autosharding_option_dicts = [{}] * num_stages
     else:
         raise ValueError(f"Invalid pipeline stage option: {stage_option}")
 
     if given_mesh:
-        sliced_meshes = [
-            mesh.get_virtual_physical_mesh()
-            for mesh in virtual_mesh.launched_physical_mesh_group
-        ]
+        sliced_meshes = [mesh.get_virtual_physical_mesh()
+                         for mesh in virtual_mesh.launched_physical_mesh_group]
     else:
         sliced_meshes = get_sliced_virtual_submeshes(virtual_mesh,
                                                      submesh_shapes)
@@ -753,16 +748,14 @@ def cluster_layers_and_slice_mesh(
         stage_layer_ids = forward_stage_layer_ids
         stage_to_mesh = list(range(num_forward_stages))
     else:
-        backward_stage_layer_ids = [[
-            2 * num_layers - 1 - i for i in reversed(layer_ids)
-        ] for layer_ids in reversed(forward_stage_layer_ids)]
+        backward_stage_layer_ids = [[2 * num_layers - 1 - i for i in reversed(layer_ids)]               # 进行一些 ids 操作
+                                    for layer_ids in reversed(forward_stage_layer_ids)]                 # 生成了 backward_ids 和 stage_ids
         stage_layer_ids = forward_stage_layer_ids + backward_stage_layer_ids
-        stage_to_mesh = list(range(num_forward_stages)) + list(
-            reversed(range(num_forward_stages)))
+        stage_to_mesh = list(range(num_forward_stages)) + list(reversed(range(num_forward_stages)))
 
-    stage_outvars = get_stage_outvars(layers, stage_layer_ids, acc_grad_outvars)
+    stage_outvars = get_stage_outvars(layers, stage_layer_ids, acc_grad_outvars)                        # list, 每个stage 的 outVars
     merged_stages = []
-    for stage_id, layer_ids in enumerate(stage_layer_ids):
+    for stage_id, layer_ids in enumerate(stage_layer_ids):                                              ## 这里感觉很关键？？？？好像例子不太满足直接 continue 了
         if len(layer_ids) == 1:
             merged_stages.append(layers[layer_ids[0]])
             continue
@@ -780,7 +773,7 @@ def cluster_layers_and_slice_mesh(
         merged_stages.append(merged_stage)
     stages = merged_stages
 
-    # Check the validity of logical mesh shapes
+    # 检查 logical mesh shapes 的合法性
     assert len(logical_mesh_shapes) == len(sliced_meshes)
     for logical_mesh_shape, submesh in zip(logical_mesh_shapes, sliced_meshes):
         assert np.prod(logical_mesh_shape) == submesh.num_devices
@@ -790,10 +783,10 @@ def cluster_layers_and_slice_mesh(
     else:
         autosharding_option_dicts = [{}] * len(sliced_meshes)
 
-    manual_stage_option = ManualStageOption(
-        forward_stage_layer_ids, tuple(x.shape for x in sliced_meshes),
-        logical_mesh_shapes, autosharding_option_dicts)
-
+    manual_stage_option = ManualStageOption(forward_stage_layer_ids,                            # 1. 每个 forward stage 的 Layer IDs .
+                                            tuple(x.shape for x in sliced_meshes),              # 2. 每个 stage的submesh 的物理shape
+                                            logical_mesh_shapes, autosharding_option_dicts)     # 3. 每个 stage的submesh 的逻辑shape
+                                                                                                # 4. 每个 stage的 auto-sharding options
     timers("stage-construction").stop()
     return stages, stage_to_mesh, sliced_meshes, manual_stage_option
 
@@ -850,3 +843,5 @@ def _cluster_layers_with_even_tflops(layers, num_stage):
                 tuple(range(forward_layer_ids[-1][-1] + 1, i + 1)))
     forward_layer_ids = forward_layer_ids[1:]
     return forward_layer_ids
+
+

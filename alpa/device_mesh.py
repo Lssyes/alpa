@@ -29,6 +29,7 @@ import shutil
 import threading
 import time
 from typing import Any, List, Union, Sequence, Tuple, Optional
+from RainbowPrint import RainbowPrint as rp
 
 from jax import core, xla, device_put
 from jax._src.api import ShapeDtypeStruct
@@ -1791,16 +1792,14 @@ def prefetch(dis_arrays: Sequence[Union[ShardedDeviceArray, DistributedArray,
 ########################################
 class VirtualPhysicalMesh:
     """
-    A virtual physical mesh used for pipeline parallel compilation.
+    pipeline parallel compilation 使用 virtual physical mesh.
 
-    VirtualPhysicalMesh is used during compile time. We don't allocate actual
-    workers for it. When compilation is finished, we instantiated it as a
-    PhysicalDeviceMesh and launch workers.
+    VirtualPhysicalMesh 在 compile 时被使用. 我们不会为此分配实际的worker。
+    编译完成后, 我们将其实例化为 PhysicalDeviceMesh 并 launch workers。
 
-    A VirtualPhysicalMesh can also be sliced into multiple VirtualPhysicalMesh.
-    After slicing, each sliced VirtualPhysicalMesh can be instantiated as a
-    PhysicalDeviceMesh. These sliced PhysicalDeviceMesh together can form a
-    PhysicalDeviceMeshGroup for pipeline parallelism.
+    一个VirtualPhysicalMesh也可以分割成多个VirtualPhysical Mesh。切片后,每个切片
+    的 VirtualPhysicalMesh 都可以实例化为 PhysicalDeviceMesh。这些切片
+    的 PhysicalDeviceMesh 一起可以形成一个 PhysicalDeviceMeshGroup, 以实现pipeline 并行。
     """
 
     def __init__(self,
@@ -2154,9 +2153,7 @@ class DeviceCluster:
 
         for node in ray.nodes():
             for key in node["Resources"]:
-                if (is_ray_node_resource(key) and
-                        global_config.ray_accelerator_name
-                        in node["Resources"]):
+                if (is_ray_node_resource(key) and global_config.ray_accelerator_name in node["Resources"]):
                     all_host_info.append(node)
                     all_host_ips.append(key.split("node:")[-1])
 
@@ -2283,16 +2280,22 @@ class DeviceCluster:
         """
         Slice a subset of hosts and devices to form a virtual physical mesh.
 
-        The only difference between a virtual and a physical mesh is that a
-        virtual mesh does not request cluster resources.
+        virtual 和 physical mesh  之间的唯一区别就是 virtual mesh 不 request cluster resources.
         """
+        # 原来的代码
         host_ids = host_ids or np.arange(len(self.host_info))
         host_info = [self.host_info[x] for x in host_ids]
-
-        num_devices_per_host = num_devices_per_host or self.host_num_devices[
-            host_ids[0]]
+        num_devices_per_host = num_devices_per_host or self.host_num_devices[host_ids[0]]
         for host_id in host_ids:
             assert self.host_num_devices[host_id] >= num_devices_per_host
+        
+        # faker start
+        # fake_node_num = 8
+        # host_ids = np.arange(fake_node_num)
+        # host_info = [self.host_info[x%2] for x in np.arange(fake_node_num)]
+        # num_devices_per_host = 8
+        # faker stop
+
 
         return VirtualPhysicalMesh(host_ids=host_ids,
                                    host_info=host_info,
@@ -2317,17 +2320,29 @@ def init_global_cluster(cluster: str,
                         num_devices_per_node: Optional[int] = None,
                         namespace: Optional[str] = None):
     global global_cluster, global_physical_mesh, global_virtual_physical_mesh
-
     if cluster == "local":
         global_physical_mesh = LocalPhysicalDeviceMesh()
     elif cluster == "ray":
         if not ray.is_initialized():
+            rp.rainbow_debug("Ray is not init, init now")
             ray_addr = cluster_address if cluster_address else "auto"
-            ray.init(address=ray_addr,
+            context = ray.init(address=ray_addr,
                      ignore_reinit_error=True,
                      namespace=namespace)
+            print(context.dashboard_url)
         update_jax_platform("cpu")
         global_cluster = DeviceCluster(num_nodes, num_devices_per_node)
+        
+        ## printf information ray 集群
+        rp.rainbow_debug("-=-=-=-=-=-=-=- Ray info start --=-=-=-=-=-=-=-=-")
+        rp.rainbow_debug(f"Head -> {global_cluster.head_info['gcs_address']}, physical_DeviceMesh: {global_cluster.host_num_devices}")
+        for idx in range(global_cluster.num_hosts):
+            node = global_cluster.host_info[idx]
+            rp.rainbow_info(f"host_ip: {node['NodeManagerAddress']}")
+            for res in node["Resources"]:
+                print(f"\t[{res}]:  {node['Resources'][res]}")
+        rp.rainbow_debug("-=-=-=-=-=-=-=- Ray info end  --=-=-=-=-=-=-=-=-\n\n\n")
+        
         global_virtual_physical_mesh = (
             global_cluster.get_virtual_physical_mesh())
 

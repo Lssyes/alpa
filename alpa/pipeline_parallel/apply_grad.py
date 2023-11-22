@@ -35,7 +35,8 @@ def _filter_droped(vars):
 
 
 def _pipeline_marker_analysis(compute_eqns):
-    """Get vars as inputs and outputs of layers"""
+    """Get vars as inputs and outputs of layers
+    获取变量作为层的输入和输出"""
     layer_invars = set()
     pipeline_outvars = {}
     marker_cnt = 0
@@ -131,7 +132,8 @@ def _get_delayed_eqns(compute_eqns, layer_invars, pipeline_outvars, gensym_fn):
     """
     Get eqns that can be delayed to apply gradient stage and rewrite eqns that
     cannot do so by moving them into a layer.
-
+    获取可以延迟apply gradient stage 的eqn, 并通过将无法 do so(延迟)的 eqn 移动到 layer 中来重写它们。
+    
     An example of cannot delayed vars is: x is computed in layer0, and sent to
     layer1 and layer2. There is grad(x) = grad_1(x) + grad_2(x), but the
     grad(weight) depends on grad(x) and is in the acc_grad period, so we cannot
@@ -144,7 +146,9 @@ def _get_delayed_eqns(compute_eqns, layer_invars, pipeline_outvars, gensym_fn):
     marked_vars = set()
     used_vars = set()
     out_marker = True
+    # print("反向打印comppute_eqns")
     for eqn in reversed(compute_eqns):
+        # print(eqn)
         invars = _filter_literal(eqn.invars)
         outvars = _filter_droped(eqn.outvars)
         used_outvars = used_vars.intersection(outvars)
@@ -173,8 +177,8 @@ def _get_delayed_eqns(compute_eqns, layer_invars, pipeline_outvars, gensym_fn):
                 marked_vars.update(invars)
                 new_compute_eqns.append(eqn)
             else:
-                assert not marked_vars.intersection(
-                    outvars), f"'{eqn}' is partially marked."
+                assert not marked_vars.intersection(outvars), f"'{eqn}' is partially marked."
+                
                 if layer_invars.intersection(outvars):
                     # move the marked var to the latest stage producing some of
                     # its invars.
@@ -273,20 +277,26 @@ def _rewrite_cross_layer_grad(compute_eqns, microbatch_bound, apply_eqns,
     If a parameter is used in multiple stages, its gradient is computed in
     multiple stages and then added together. We accumulate the results on each
     stage, and add them together exactly at the start of apply grad period.
+    如果一个参数在多个 stage 中使用, 则会在多个 stage 中计算其梯度, 然后将其相加。
+    我们 accumulate 每个 stage 的结果, 并在 apply grad period 开始时将其相加。
 
     A common use case is the tied embedding in language models.
+    一个常见的用例是语言模型中的 tied embedding.
     """
     layer_invars, pipeline_outvars = _pipeline_marker_analysis(compute_eqns)
-    # Those eqn directly use output of pipeline end is delayed to apply grad.
-    cross_layer_grad_eqns, new_compute_eqns = _get_delayed_eqns(
-        compute_eqns, layer_invars, pipeline_outvars, gensym_fn)
+    # Those eqn directly use output of pipeline end is delayed to apply grad. 
+    # 那些直接使用 pipeline end 输出的eqn 延迟 apply grad。
+    # mlp 案例这步没有效果 TODO:以后研究一下
+    cross_layer_grad_eqns, new_compute_eqns = _get_delayed_eqns(compute_eqns, layer_invars, 
+                                                                pipeline_outvars, gensym_fn)
     # Rewrite microbatch_bound and cross_layer_grad eqns.
     (new_microbatch_bound,
-     microbatch_bound_in_to_outs) = _rewrite_microbatch_bound(
-         microbatch_bound, cross_layer_grad_eqns, gensym_fn)
+     microbatch_bound_in_to_outs) = _rewrite_microbatch_bound(microbatch_bound, 
+                                                              cross_layer_grad_eqns, 
+                                                              gensym_fn)
     # rewrite cross layer grad eqns and insert them to the top of apply eqns.
-    new_apply_eqns = _rewrite_delayed_gradient_sum_eqns(
-        cross_layer_grad_eqns, microbatch_bound_in_to_outs)
+    new_apply_eqns = _rewrite_delayed_gradient_sum_eqns(cross_layer_grad_eqns, 
+                                                        microbatch_bound_in_to_outs)
     new_apply_eqns += apply_eqns
     new_global_outvars = list(closed_jaxpr.jaxpr.outvars)
     for idx in range(len(new_global_outvars)):
@@ -378,10 +388,8 @@ def split_compute_grad_and_apply_grad(closed_jaxpr: ClosedJaxpr, gensym_fn,
         closed_jaxpr.eqns[:split_idx], split_eqn,
         closed_jaxpr.eqns[split_idx + 1:]
     ]
-    # Some equations are not marked. This pass moves them either into apply grad
-    # or a layer.
-    closed_jaxpr = _rewrite_cross_layer_grad(*sliced_eqns, gensym_fn,
-                                             closed_jaxpr)
+    # Some equations are not marked. This pass moves them either into apply grad or a layer.
+    closed_jaxpr = _rewrite_cross_layer_grad(*sliced_eqns, gensym_fn, closed_jaxpr)
     closed_jaxpr, sliced_eqns = _remove_replicated_marked_var(closed_jaxpr)
     # Reconstruct jaxpr
     sliced_jaxprs = slices_to_jaxpr(closed_jaxpr, sliced_eqns)
@@ -618,15 +626,14 @@ def process_apply_gradient(apply_grad_jaxpr, microbatch_bound, pipeline_stages,
         slice_apply_gradient(apply_grad_jaxpr, gradvar_to_mesh, outvar_mesh,
                              num_meshes, len(pipeline_stages), donation_mapping,
                              gensym_func, profiling, mesh_num_devices))
-    sliced_apply_grad_stages, out_map = apply_grad_add_marker(
-        sliced_apply_grad_stages,
-        apply_in_to_acc_out,
-        gensym_func,
-        computation=True)
+    
+    sliced_apply_grad_stages, out_map = apply_grad_add_marker(sliced_apply_grad_stages,
+                                                              apply_in_to_acc_out,
+                                                              gensym_func,
+                                                              computation=True)
     global_outvars = [get_var_mapping(out_map, var) for var in global_outvars]
 
-    return (sliced_apply_grad_stages, apply_grad_placement, global_outvars,
-            allreduce_groups)
+    return (sliced_apply_grad_stages, apply_grad_placement, global_outvars, allreduce_groups)
 
 
 def replace_all_with(closed_jaxpr: ClosedJaxpr, mapping):

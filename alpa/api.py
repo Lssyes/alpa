@@ -1,5 +1,6 @@
 """Top-level user API."""
 from typing import Callable, Optional, Sequence, Union
+from colorama import Fore, Back, Style
 
 from jax import linear_util as lu
 from jax._src import api, traceback_util
@@ -53,6 +54,7 @@ def init(cluster: str = "ray",
     global is_initialized
 
     if is_initialized:
+        print("is_initialized before")
         return
     is_initialized = True
 
@@ -67,7 +69,7 @@ def shutdown():
     is_initialized = False
     shutdown_global_cluster()
 
-
+# @parallelize 调用 ParallelizedFunc类 的封装
 def parallelize(fun: Optional[Callable] = None,
                 *,
                 static_argnums: Union[Sequence[int], str] = "auto",
@@ -78,34 +80,33 @@ def parallelize(fun: Optional[Callable] = None,
     Parallelize a jax function.
 
     Args:
-        fun: The function to be parallelized.
-        static_argnums: The same as the static_argnums argument of jax.jit.
-          If it is "auto", alpa uses heuristic rules to infer this.
-        donate_argnums: The same as the donate_argnums argument of jax.jit.
-          If it is "auto", alpa uses heuristic rules to infer this.
-        batch_argnums: The indices of arguments that are the data batch.
-          This information is used to split the original data batch into micro
-          batches to perform gradient accumulation or pipeline parallelism.
-          Alpa assumes the 0-th dimension of the tensor is the batch dimension.
-        method: The parallelization method.
+        fun: 要并行化的函数.
+        static_argnums: 与 jax.jit 的 static_argnums 参数相同.
+          如果是“auto”, alpa 使用启发式规则来推断。
+        donate_argnums: 与 jax.jit 的 static_argnums 参数相同.
+          如果是“auto”, alpa 使用启发式规则来推断。
+        batch_argnums: 作为 data batch 的参数索引.
+          该信息用于将原始数据批次拆分为mini-batch, 以执行 梯度累积 或 pipeline并行。
+          Alpa 假设张量的第 0 维是批量维度。
+        method: 并行化方法
     """
     check_alpa_jaxlib_version()
 
     def decorate_fun(fun):
         api._check_callable(fun)  # pylint: disable=protected-access
-        nonlocal method
-        method = method or ShardParallel()
-        return ParallelizedFunc(fun, static_argnums, donate_argnums,
-                                batch_argnums, method)
+        nonlocal method           # 表示 method 为上一级函数中的局部变量
+        method = method or ShardParallel()  # 若 method 为 None 则用 ShardParallel
+        return ParallelizedFunc(fun, static_argnums, donate_argnums, batch_argnums, method)
 
     if fun is None:
         return decorate_fun
-    return decorate_fun(fun)
+    return decorate_fun(fun)  # ParallelizedFunc()(fun)
 
 
+# 被 parallelize @ 过的func 就会变成这个Class的形状
+# Officely, 经过alpa.parallelize转换后的函数。
 class ParallelizedFunc:
-    """The function after being transformed by alpa.parallelize."""
-
+    """ 经过alpa.parallelize转换后的函数. """
     def __init__(
         self,
         fun: Callable,
@@ -124,10 +125,12 @@ class ParallelizedFunc:
 
     @traceback_util.api_boundary
     def __call__(self, *args):
-        """Launch the computation on the driver."""
-        executable, _, out_tree, args_flat = (
-            self._decode_args_and_get_executable(*args))
+        """ 在驱动程序上启动计算。
+        Launch the computation on the driver."""
+        # print("Cccccccccaaaaaaalllllll  me")
+        executable, _, out_tree, args_flat = (self._decode_args_and_get_executable(*args))
         out = executable.launch_on_driver(*args_flat)
+        # print(out_tree())
         return tree_unflatten(out_tree(), out)
 
     def get_executable(self, *args):
@@ -152,12 +155,12 @@ class ParallelizedFunc:
                                                          self.donate_argnums,
                                                          self.batch_argnums)
         kwargs = {}
-
+        # print(f"static_argnums, donate_argnums, batch_argnums: {static_argnums, donate_argnums, batch_argnums}")
         f = lu.wrap_init(self.fun)
 
         # Deal with static arguments and extract dynamic arguments
         if static_argnums == "auto":
-            static_argnums = auto_static_argnums(args)
+            static_argnums = auto_static_argnums(args) 
 
         if static_argnums:
             dyn_argnums = [
@@ -175,7 +178,11 @@ class ParallelizedFunc:
             dyn_args = args
 
         # Flatten pytree arguments
-        args_flat, in_tree = tree_flatten(dyn_args)
+        #   1. args_flat 是 TrainState 和 dict{x, y} 的 PytreeFlat 形式
+        #      in_treee  是 TrainState 和 dict{x, y} 的 PyTreeDef, 与上面对应
+        #   2. f,out_tree是 jax 封装了的 ？？？？？不理解
+        #      
+        args_flat, in_tree = tree_flatten(dyn_args)    
         f, out_tree = flatten_fun_nokwargs(f, in_tree)
         # pylint: disable=unnecessary-lambda
         out_tree_hashable = HashableFunction(lambda: out_tree(), closure=None)
@@ -217,7 +224,13 @@ def _compile_parallel_executable(
     *avals: Sequence[AbstractValue],
 ):
     """Cached parallelized callable."""
-    # Clean stores for the next call
+    # 把“所有”的 invar 参数打印一下
+    print(Back.GREEN + "donated\tbatch\tavals")
+    for i in range(len(batch_invars)):
+        print(Back.GREEN + f"{donated_invars[i]}\t{batch_invars[i]}\t{avals[i]}")
+    print(Style.RESET_ALL)
+    
+    # Clean stores fo the next call
     for store in fun.stores:
         if store:
             store.reset()
@@ -228,9 +241,13 @@ def _compile_parallel_executable(
     batch_invars = tuple(batch_invars)
 
     # Compile a callable
-    return method.compile_executable(fun, in_tree, out_tree_thunk,
-                                     static_argnums, donated_invars,
-                                     batch_invars, *avals)
+    return method.compile_executable(fun, 
+                                     in_tree, 
+                                     out_tree_thunk,
+                                     static_argnums, 
+                                     donated_invars,
+                                     batch_invars, 
+                                     *avals)
 
 
 def clear_executable_cache():
@@ -244,8 +261,10 @@ def grad(*args, **kwargs):
 
     This function annotates all gradient tensors. This information is used to
     perform gradient accumulation transformation.
+    此函数对所有梯度张量进行注释。该信息用于执行 gradient accumulation 变换。
     If any auxiliary tensors are returned, they are averaged over mini batches
     in the same way as how the gradients are averaged.
+    如果返回任何 辅助tensor, 则以与梯度平均相同的方式在 mini batches 上对其进行平均。
     """
 
     def ret(*call_args, **call_kwargs):
