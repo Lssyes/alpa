@@ -1,5 +1,14 @@
 # pylint: disable=arguments-differ
-"""A mesh executable encapsulates all compiled binary and meta information of
+"""mesh executable 封装了分布式可执行文件（distributed executable）的所有已编译的 binary 和 meta 信息。
+
+mesh executable 包含一个或多个 XLA 可执行文件。
+对于每种类型的 mesh executable, 都有两个part, 一个 driver 和一个 worker
+driver part 在用户脚本上运行，worker parts在 distributed workers 上运行。
+driver part 发送控制命令以启动 worker 上的 worker parts。
+
+
+
+A mesh executable encapsulates all compiled binary and meta information of
 a distributed executable.
 
 A mesh executable contains one or several XLA executables.
@@ -42,8 +51,8 @@ from alpa.wrapped_hlo import HloStatus, WrappedHlo
 
 
 class MeshDriverExecutable(ABC):
-    """The base class of the driver part of a mesh executable."""
-
+    """mesh executable 的 driver part 的基类."""
+    
     @abstractmethod
     def launch_on_driver(self, *args, **kwargs):
         """Launch the executable on the driver.
@@ -118,8 +127,8 @@ class MeshDriverExecutable(ABC):
             self.physical_mesh.delete_remote_executable(self.exec_uuid)
 
 
-class MeshWorkerExecutable(ABC):
-    """The base class of the worker part of a mesh executable."""
+class MeshWorkerExecutable(ABC):    
+    """mesh executable 的 worker part 的基类."""
 
     @abstractmethod
     def execute_on_worker(self, *arg, **kwargs):

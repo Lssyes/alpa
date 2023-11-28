@@ -67,32 +67,21 @@ if global_config.backend == "gpu" and global_config.has_cuda:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-ReshardingTileSpec = namedtuple("ReshardingTileSpec",
-                                ["offset", "rank", "gpu_idx"])
-ReshardingSendSpec = namedtuple("ReshardingSendSpec",
-                                ["device_id", "tile_spec"])
-ReshardingSendTask = namedtuple("ReshardingSendTask",
-                                ["tile_specs", "group_name"])
-ReshardingRecvSpec = namedtuple("ReshardingRecvSpec",
-                                ["device_id", "shape", "dtype", "tile_specs"])
-ReshardingRecvTask = namedtuple("ReshardingRecvTask",
-                                ["recv_specs", "group_name"])
-ReshardingBroadcastSpec = namedtuple("ReshardingBroadcastSpec", [
-    "comm_key", "world_size", "devices_ids", "devices_global_rank",
-    "tensor_slices", "recv_tile_shape", "dtype"
-])
-ReshardingBroadcastTask = namedtuple("ReshardingBroadcastTask",
-                                     ["broadcast_specs", "group_name"])
+ReshardingTileSpec = namedtuple("ReshardingTileSpec", ["offset", "rank", "gpu_idx"])
+ReshardingSendSpec = namedtuple("ReshardingSendSpec", ["device_id", "tile_spec"])
+ReshardingSendTask = namedtuple("ReshardingSendTask", ["tile_specs", "group_name"])
+ReshardingRecvSpec = namedtuple("ReshardingRecvSpec", ["device_id", "shape", "dtype", "tile_specs"])
+ReshardingRecvTask = namedtuple("ReshardingRecvTask", ["recv_specs", "group_name"])
+ReshardingBroadcastSpec = namedtuple("ReshardingBroadcastSpec", ["comm_key", "world_size", "devices_ids", "devices_global_rank",
+                                                                 "tensor_slices", "recv_tile_shape", "dtype"])
+ReshardingBroadcastTask = namedtuple("ReshardingBroadcastTask", ["broadcast_specs", "group_name"])
 
 
 ########################################
 # Ray Workers
 ########################################
 class DaemonMoveWorker:
-    """
-        A ray actor that moves local checkpoint into the shared
-        filesystem in the background.
-    """
+    """一个Ray Actor，用于在 background 将 local checkpoint 移动到 shared filesystem 中。"""
 
     def move(self, from_dir: str, to_dir: str):
         os.makedirs(to_dir, exist_ok=True)
@@ -107,7 +96,7 @@ class DaemonMoveWorker:
 
 class MeshHostWorker:
     """
-    A ray actor that manages the xla computation and buffers on a single host.
+    一个 Ray Actor, 管理单个 host 上的 XLA computation 和 buffers
     """
 
     def __init__(self, server_address: str, num_hosts: int, host_id: int,
@@ -632,10 +621,9 @@ class MeshHostWorker:
 # DeviceMeshs
 ########################################
 class PhysicalDeviceMesh(ABC):
-    """The base class of physical device mesh.
+    """physical device mesh 的基类.
 
-    A physical device mesh is a 2-dimensional mesh that runs SPMD computation on
-    all devices in the mesh.
+    A physical device mesh 是在 mesh 中的所有 device 上运行 SPMD computation 的 2D Device_Mesh。
     """
 
     num_hosts: int
@@ -646,7 +634,7 @@ class PhysicalDeviceMesh(ABC):
 
     def get_signature(self) -> str:
         """Return a signature string that contains the mesh shape and GPU
-        model."""
+        model. 返回包含 mesh shape 和 GPU model 的 signature string"""
         gpu_type = list_gpu_info()
         gpu_name = gpu_type.split("\n")[0].split(" (UUID:")[0][7:]
         ret = f"{self.num_hosts},{self.num_devices_per_host},{gpu_name}"
@@ -692,8 +680,7 @@ class PhysicalDeviceMesh(ABC):
                          intra_host_bandwidth: Optional[float] = None,
                          inter_host_bandwidth: Optional[float] = None):
         """
-        Return a logical mesh and parameters of the alpha-beta communication
-        cost model. The logical view is used for auto-sharding.
+        返回 alpha-beta 通信成本模型的 logical mesh 和 parameters。 logical view 用于 auto-sharding。
         """
         if mesh_shape is None:
             mesh_shape = (self.num_hosts, self.num_devices_per_host)
@@ -704,9 +691,9 @@ class PhysicalDeviceMesh(ABC):
             # Use the provided mesh_alpha and mesh_beta
             mesh_alpha = mesh_alpha or (1, 1)
             mesh_beta = mesh_beta or (1, 0.1)
-        elif mesh_topology == "tree":
-            # Derive mesh_alpha and mesh_beta from topology,
-            # intra_host_bandwidth and inter_host_bandwidth
+        elif mesh_topology == "tree": # 这是干什么
+            # Derive mesh_alpha and mesh_beta from topology, intra_host_bandwidth and inter_host_bandwidth
+            # 根据 topology, intra_host_bandwidth, inter_host_bandwidth 推导出 mesh_alpha 和 mesh_beta
             assert mesh_alpha is None
             assert mesh_beta is None
             mesh_alpha = [1] * 2
@@ -778,7 +765,7 @@ class PhysicalDeviceMesh(ABC):
                            donated_invars: Sequence[bool],
                            batch_invars: Sequence[bool], num_micro_batches: int,
                            args: Sequence[Any]):
-        """Shard high-level arguments as low-level buffers."""
+        """将 high-level 参数 shard 为 low-level buffers"""
         raise NotImplementedError()
 
     @abstractmethod
@@ -786,23 +773,24 @@ class PhysicalDeviceMesh(ABC):
                              shard_indices: Sequence[Sequence[Index]],
                              sharding_specs: Sequence[ShardingSpec],
                              args: Sequence[Any]):
-        """Shard arguments (np.ndarray) as distributed arrays."""
+        """Shard arguments (np.ndarray) as distributed arrays.
+           将参数(np.ndarray) shard 为 distributed arrays
+        """
+        
+        
         raise NotImplementedError()
 
     def shard_args_to_arrays_ps(self, placement_specs: PlacementSpec,
                                 args: Sequence[Any]):
         """
-        Shard arguments (np.ndarray) as distributed arrays according to
-        PlacementSpec.
+        Shard arguments (np.ndarray) as distributed arrays according to PlacementSpec.
+        根据 PlacementSpec 将参数(np.ndarray) shard 为 distributed arrays
         """
         avals = tuple(x.aval for x in placement_specs)
-        assert all(
-            len(x.mesh_ids) == 1 and x.mesh_ids[0] == self.mesh_id
-            for x in placement_specs)
+        assert all(len(x.mesh_ids) == 1 and 
+                   x.mesh_ids[0] == self.mesh_id for x in placement_specs)
         specs = tuple(x.sharding_specs[0] for x in placement_specs)
-        indices = tuple(
-            pxla.spec_to_indices(aval.shape, spec)
-            for aval, spec in zip(avals, specs))
+        indices = tuple(pxla.spec_to_indices(aval.shape, spec) for aval, spec in zip(avals, specs))
         return self.shard_args_to_arrays(avals, indices, specs, args)
 
     @abstractmethod
@@ -810,6 +798,7 @@ class PhysicalDeviceMesh(ABC):
                             sharding_specs: Sequence[ShardingSpec]):
         """
         Get a function that wraps low-level buffers to high-level output arrays.
+        获取将 low-level buffers 包装到 high-level output arrays
         """
         raise NotImplementedError()
 
@@ -862,6 +851,8 @@ class LocalPhysicalDeviceMesh(PhysicalDeviceMesh):
     """
     A single-host physical device mesh to run computation on local devices.
     It uses the native XLA runtime.
+    用于在 local devices 上运行计算的 single-host physical device mesh。
+    它使用 native XLA runtime。
     """
 
     def __init__(self, devices: Sequence["Device"] = None):
@@ -981,6 +972,8 @@ class DistributedPhysicalDeviceMesh(PhysicalDeviceMesh):
     """
     A multi-host physical device mesh to run computation distributedly.
     It uses ray actors and the distributed XLA runtime.
+    一种分布式运行计算的 multi-host physical device mesh。
+    它使用 ray actors 和 distributed XLA runtime。
     """
 
     def __init__(self,

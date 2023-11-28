@@ -86,9 +86,9 @@ class GpuHost:
         # All-reduce
 
         # Send-recv
-        # for i in range(5, 6):
-        self.profile_send_recv(1 << 3, cp.float32, 0, 1)
-        self.profile_send_recv(1 << 3, cp.float32, 0, self.world_size - 1)
+        for i in range(5, 10):
+            self.profile_send_recv(1 << i, cp.float32, 0, 1)
+            self.profile_send_recv(1 << i, cp.float32, 0, self.world_size - 1)
 
 
     def sync(self):
