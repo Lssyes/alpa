@@ -2149,12 +2149,32 @@ class DeviceCluster:
                 if (is_ray_node_resource(key) and global_config.ray_accelerator_name in node["Resources"]):
                     all_host_info.append(node)
                     all_host_ips.append(key.split("node:")[-1])
+                    
+        ######### Faker dict4 = copy.deepcopy(dict1) #深拷贝
+        all_host_ips_fake = ['192.168.0.5[0]', '192.168.0.5[1]', '192.168.0.5[2]', '192.168.0.5[3]',
+                             '192.168.0.4[0]', '192.168.0.4[1]', '192.168.0.4[2]', '192.168.0.4[3]']
+        import copy
+        all_host_info_fake = [copy.deepcopy(all_host_info[0]),
+                              copy.deepcopy(all_host_info[0]),
+                              copy.deepcopy(all_host_info[0]),
+                              copy.deepcopy(all_host_info[0]),
+                              copy.deepcopy(all_host_info[1]),
+                              copy.deepcopy(all_host_info[1]),
+                              copy.deepcopy(all_host_info[1]),
+                              copy.deepcopy(all_host_info[1])]
+        
+        for i, host_info in enumerate(all_host_info_fake):
+            host_info["NodeManagerAddress"] = all_host_ips_fake[i]
+            
+        # all_host_ips = all_host_ips_fake
+        # all_host_info = all_host_info_fake
+        ########
 
         # Gather device info
         all_host_num_devices = []
         for host_info in all_host_info:
             number = host_info["Resources"][global_config.ray_accelerator_name]
-            assert number.is_integer()
+            assert number.is_integer()  ###### 这里因为 fake 8 x 8，所以注释掉了，正常情况要有这步
             all_host_num_devices.append(int(number))
 
         # adjust the resource allocations
@@ -2218,6 +2238,14 @@ class DeviceCluster:
         else:
             self.host_info = all_host_info
             self.host_ips = all_host_ips
+            
+            ######## fake
+            self.host_info = all_host_info_fake
+            self.host_ips = all_host_ips_fake
+            self.host_num_devices = [8] * 8
+            
+            
+            ###### fake
 
     def delete_placement_group(self):
         """remove the placement group for the current device cluster."""
@@ -2325,8 +2353,10 @@ def init_global_cluster(cluster: str,
             print(context.dashboard_url)
         update_jax_platform("cpu")
         global_cluster = DeviceCluster(num_nodes, num_devices_per_node)
+        global_virtual_physical_mesh = (global_cluster.get_virtual_physical_mesh())
         
-        ## printf information ray 集群
+        
+        ## printf i1nformation ray 集群
         rp.rainbow_debug("-=-=-=-=-=-=-=- Ray info start --=-=-=-=-=-=-=-=-")
         rp.rainbow_debug(f"Head -> {global_cluster.head_info['gcs_address']}, physical_DeviceMesh: {global_cluster.host_num_devices}")
         for idx in range(global_cluster.num_hosts):
@@ -2336,8 +2366,6 @@ def init_global_cluster(cluster: str,
                 print(f"\t[{res}]:  {node['Resources'][res]}")
         rp.rainbow_debug("-=-=-=-=-=-=-=- Ray info end  --=-=-=-=-=-=-=-=-\n\n\n")
         
-        global_virtual_physical_mesh = (
-            global_cluster.get_virtual_physical_mesh())
 
 
 def shutdown_global_cluster():

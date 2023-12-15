@@ -125,8 +125,8 @@ def compile_pipeshard_executable(
     else:
         parsed_ms_option = None
     pipeshard_config = compile_pipeshard_executable_internal(
-        closed_jaxpr, full_batch_closed_jaxpr, micro_batch_size, donated_invars,
-        batch_invars, virtual_mesh, num_microbatch, pipeline_schedule,
+        closed_jaxpr, full_batch_closed_jaxpr, micro_batch_size, donated_invars,    # closed_jaxpr 是 microbatch的 jaxpr
+        batch_invars, virtual_mesh, num_microbatch, pipeline_schedule,  # 区分 micro_batch_size & num_microbatch
         default_as_option, stage_option, name_base, global_input_shardings,
         None, stage_input_shardings, parsed_ms_option)
 
@@ -164,7 +164,7 @@ def compile_pipeshard_executable_internal(
           each stage.
     """
     global_invars = closed_jaxpr.jaxpr.invars
-    gensym_func = gensym([closed_jaxpr.jaxpr])
+    gensym_func = gensym([closed_jaxpr.jaxpr]) # 生成不同的变量，并用可选后缀打印。如果提供了 jaxprs，则生成的变量将与任何给定 jaxprs 中的变量不同。
     inference_mode = (pipeline_schedule == "inference")
 
     (closed_jaxpr, global_outvars, jax_pipeline_layers, apply_grad_jaxpr,           # jax_pipeline_layers: 前向/后向 的 pipeline

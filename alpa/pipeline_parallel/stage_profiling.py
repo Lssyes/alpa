@@ -485,21 +485,23 @@ def compile_all(stages, num_micro_batches, default_as_option, profile_results):
     """
     Compile all input stages.
     """
-    num_cpus = int(
-        min(max(ray.available_resources()["CPU"] // 2, 1), len(stages)))
-
+    num_cpus = int(min(max(ray.available_resources()["CPU"] // 2, 
+                           1), 
+                       len(stages)))
     compile_workers = CompileWorkerPool(num_cpus)
     num_compiled_stages = 0
     for i, (stage_idx, stage_config, auto_sharding_config) in enumerate(stages):
-        if (stage_idx in profile_results and
-                profile_results[stage_idx].fully_profiled()):
+        if (stage_idx in profile_results and profile_results[stage_idx].fully_profiled()):
             continue
+        
         logical_mesh, autosharding_option_dict = auto_sharding_config
-        compile_workers.submit(
-            lambda w, v: w.compile_stage_for_profiling.remote(*v),
-            (i, stage_config.compile_config, logical_mesh,
-             dataclasses.replace(default_as_option, **
-                                 autosharding_option_dict), num_micro_batches))
+        compile_workers.submit(lambda w, v: w.compile_stage_for_profiling.remote(*v),
+                               (i, stage_config.compile_config, 
+                                logical_mesh,
+                                dataclasses.replace(default_as_option, 
+                                                    **autosharding_option_dict), 
+                                num_micro_batches))
+        
         num_compiled_stages += 1
 
     compiled_outputs = [None] * len(stages)
@@ -518,21 +520,22 @@ def compile_all(stages, num_micro_batches, default_as_option, profile_results):
         apply_in_shardings = compiled_output.apply_grad_input_sharding_protos
         if apply_in_shardings is not None:
             (initial_var_names,
-             initial_var_sizes) = compute_apply_grad_invar_size(
-                 apply_in_shardings, stage_config.apply_grad_config,
-                 logical_mesh_shape)
+             initial_var_sizes) = compute_apply_grad_invar_size(apply_in_shardings, 
+                                                                stage_config.apply_grad_config,
+                                                                logical_mesh_shape)
         else:
             initial_var_names = ()
             initial_var_sizes = ()
         if stage_idx not in profile_results:
-            profile_results[stage_idx] = StageProfileResult(
-                stage_config.n_modules, initial_var_names, initial_var_sizes)
+            profile_results[stage_idx] = StageProfileResult(stage_config.n_modules,
+                                                            initial_var_names,
+                                                            initial_var_sizes)
         else:
-            original_initial_size_dict = dict(
-                zip(profile_results[stage_idx].initial_var_names,
-                    profile_results[stage_idx].initial_var_sizes))
-            new_initial_size_dict = dict(
-                zip(initial_var_names, initial_var_sizes))
+            original_initial_size_dict = dict(zip(profile_results[stage_idx].initial_var_names,
+                                                  profile_results[stage_idx].initial_var_sizes))
+            new_initial_size_dict = dict(zip(initial_var_names, 
+                                             initial_var_sizes))
+            
             assert original_initial_size_dict == new_initial_size_dict, (
                 f"Initial sizes mismatch between loaded result and newly "
                 f"compiled result: {original_initial_size_dict} "
@@ -643,7 +646,7 @@ def profile_all(stages, compiled_outputs: Sequence[CompileOutput], meshes,
     profile_workers.shutdown()
     return profile_results
 
-
+# ????????????????????????????? nmb 注释呢
 def generate_training_stages_2d(layers,
                                 layer_flops_prefix_sum,
                                 accumulator_mapping,
@@ -662,40 +665,40 @@ def generate_training_stages_2d(layers,
     indices = list(range(2 * num_layers))
     computation_source_ratio = mesh_num_devices / cluster_size
     is_full_mesh = computation_source_ratio == 1
-    tot_flops = layer_flops_prefix_sum[2 * num_layers]
+    tot_flops = layer_flops_prefix_sum[2 * num_layers]  # 前缀和
     stages = []
     for start in tqdm.tqdm(range(0, num_layers)):
         for end in tqdm.tqdm(range(start, num_layers), leave=False):
-            if is_full_mesh and not (start == 0 and end == num_layers - 1):
+            if is_full_mesh and not (start == 0 and end == num_layers - 1): # 如果 给定Submesh是整个DeviceMesh, 则 start必须为0 end必须为layer-1
                 continue
-            flops_ratio = (
-                layer_flops_prefix_sum[end + 1] - layer_flops_prefix_sum[start]
-                + layer_flops_prefix_sum[2 * num_layers - start] -
-                layer_flops_prefix_sum[2 * num_layers - end - 1]) / tot_flops
-            if (computation_source_ratio > flops_ratio *
-                (1 + stage_imbalance_tolerance) or
-                    computation_source_ratio < flops_ratio /
-                (1 + stage_imbalance_tolerance)):
+            flops_ratio = (  layer_flops_prefix_sum[end + 1]                    #  [i, j] 的 flops = (j+1) - i
+                           - layer_flops_prefix_sum[start]                      #  #1 - #2: 当前stage的所有Forward-op的 flops
+                           + layer_flops_prefix_sum[2 * num_layers - start]     #  #3 - #4: 当前stage的所有Bakward-op的 flops
+                           - layer_flops_prefix_sum[2 * num_layers - end - 1]) / tot_flops   # flops_ratio: 当前 stage 的FB总共的flops 占总compute阶段的比例
+            
+            if (computation_source_ratio > flops_ratio * (1 + stage_imbalance_tolerance) or # 如果负载不均衡则 continue
+                computation_source_ratio < flops_ratio / (1 + stage_imbalance_tolerance)):
                 continue
-            forward_layer_indices = indices[start:end + 1]
-            backward_layer_indices = indices[2 * num_layers - end -
+            
+            forward_layer_indices = indices[start:end + 1]              # Forward-layer 的 indices
+            backward_layer_indices = indices[2 * num_layers - end -     # Bakward-layer 的 indices
                                              1:2 * num_layers - start]
-            selected_apply_grad_layers = [
+            selected_apply_grad_layers = [                              # 根据 Forward-layer-indices 选出对应的 apply_grad_layer    
                 apply_grad_layers[idx]
                 for idx in forward_layer_indices
                 if apply_grad_layers[idx] is not None
             ]
             stage_name = f"stage_{start}_{end}"
-            stage_config = generate_stage_info(
+            stage_config = generate_stage_info(       # 将选定的layers组合在一起用来进行profiling   
                 layers, [forward_layer_indices, backward_layer_indices],
                 accumulator_mapping, acc_grad_invars, acc_grad_outvars,
                 stage_name, selected_apply_grad_layers, apply_grad_global_info)
-            for config_idx, autosharding_config in enumerate(
-                    autosharding_configs):
+            
+            for config_idx, autosharding_config in enumerate(autosharding_configs): ## 对于不同的 autosharding_config, 他们的 stage_config 是相同的
                 if autosharding_config is not None:
                     stage_indices = (start, end, mesh_id, config_idx)
-                    stages.append(
-                        (stage_indices, stage_config, autosharding_config))
+                    stages.append((stage_indices,           
+                                   stage_config, autosharding_config))      ## 所以这里的stage_config 是用来干啥的？？？看起来是用来acc的
     return stages
 
 
@@ -1110,7 +1113,7 @@ def distributed_profile_on_mesh(stages, meshes: Sequence[VirtualPhysicalMesh],
 
     print("- Compile all stages")
     try:
-        compiled_outputs = compile_all(stages, num_micro_batches,
+        compiled_outputs = compile_all(stages, num_micro_batches,               # 先编译
                                        default_as_option, profile_results)
     except RayActorError as e:
         logger.warning(f"Compilation fatal error: {e}")
@@ -1122,8 +1125,8 @@ def distributed_profile_on_mesh(stages, meshes: Sequence[VirtualPhysicalMesh],
     # shape of compute_cost and max_n_succ_stages:
     # (num_layers, num_layers, num_autosharding_configs)
     timers("stage-construction-profiling").start()
-    profile_results = profile_all(stages, compiled_outputs, meshes,
-                                  num_micro_batches, auto_stage_option,
+    profile_results = profile_all(stages, compiled_outputs, meshes,             # 在mesh上profile
+                                  num_micro_batches, auto_stage_option,     
                                   profile_results)
     timers("stage-construction-profiling").stop()
     return profile_results
@@ -1176,11 +1179,13 @@ def get_compute_cost(
         auto_stage_option: "AutoStageOption",
         inference_mode: bool = False):
     """Get computation cost for each possible (stage, mesh) configuration.
-
+       获取每个可能的 (stage, mesh) 配置的计算成本 t_intra
+       
     This function enumerates all given submesh choices, then profiles compute
     cost of all stage configuration under the submesh. For each submesh, it
     slices the given mesh or the whole device cluster into submeshes to profile.
-
+    该函数枚举所有给定的 Submesh choices, 然后分析计算 submesh 下所有 stage configuration 的成本. 
+    对于每个Submesh, 它将给定mesh或整个device cluster分割成submeshes以进行分析.
     Args:
         virtual_mesh: The whole virtual mesh. If profile_with_whole_ray_cluster
             is turned off in global config, virtual_mesh is sliced into pieces
@@ -1215,7 +1220,7 @@ def get_compute_cost(
             is calculated based on memory constraints.
     """
     cluster_size = virtual_mesh.num_devices
-    layer_flops_prefix_sum = _get_layer_flops_prefix_sum(layers)
+    layer_flops_prefix_sum = _get_layer_flops_prefix_sum(layers)   # 此处获得的是一个前缀和 1...12 表示 layer0-11, 0表示开头
     if inference_mode:
         num_layers = len(layers)
     else:
@@ -1238,11 +1243,8 @@ def get_compute_cost(
         num_hosts, num_devices_per_host = submesh
         tic = time()
         if global_config.profile_with_whole_ray_cluster:
-            whole_cluster_virtual_mesh = get_global_cluster(
-            ).get_virtual_physical_mesh()
-            sliced_virtual_meshes = (
-                whole_cluster_virtual_mesh.slice_profiling_submeshes(
-                    num_hosts, num_devices_per_host))
+            whole_cluster_virtual_mesh = get_global_cluster().get_virtual_physical_mesh()
+            sliced_virtual_meshes = (whole_cluster_virtual_mesh.slice_profiling_submeshes(num_hosts, num_devices_per_host)) ## (2, 2) 没有进行任何操作？？？
         else:
             sliced_virtual_meshes = virtual_mesh.slice_profiling_submeshes(
                 num_hosts, num_devices_per_host)
@@ -1257,7 +1259,7 @@ def get_compute_cost(
                     sliced_virtual_meshes[0].num_devices, cluster_size,
                     auto_stage_option.stage_imbalance_tolerance)
             else:
-                stages = generate_training_stages_2d(
+                stages = generate_training_stages_2d(       ## 生成 2d 的 trainning stage
                     layers, layer_flops_prefix_sum, accumulator_mapping,
                     acc_grad_invars, acc_grad_outvars, apply_grad_layers,
                     apply_grad_global_info, mesh_id,
@@ -1279,10 +1281,10 @@ def get_compute_cost(
             raise ValueError(f"Unknown layer profile mode: "
                              f"{auto_stage_option.layer_profile_mode}")
 
-        check_profile_results_consistent(stages, profile_results)
+        check_profile_results_consistent(stages, profile_results)       # 这里如果有缓存catch 的profiliing就直接读取了
 
-        profile_results = distributed_profile_on_mesh(
-            stages, sliced_virtual_meshes, num_micro_batches, default_as_option,
+        profile_results = distributed_profile_on_mesh(                  # 在 mesh 上 profile！！！！！！！！！！！！！！！！！！！！！！！！！
+            stages, sliced_virtual_meshes, num_micro_batches, default_as_option, #！@！！！！！！
             auto_stage_option, profile_results)
 
         toc = time()
@@ -1407,13 +1409,13 @@ def generate_stage_info(all_layers, selected_indices,
                         global_accumulator_mapping, acc_grad_invars,
                         acc_grad_outvars, name, apply_grad_layers,
                         apply_grad_info):
-    """Combine selected layers together for profiling."""
+    """Combine selected layers together for profiling.将选定的layers组合在一起进行分析"""
     modules = []
     module_accumulator_mappings = []
     module_required_outvars = []
     for layer_indices in selected_indices:
         module, module_accumulator_mapping, required_outvars = (
-            select_module_layers(all_layers, layer_indices,
+            select_module_layers(all_layers, layer_indices,         # 对于每个module，选择layer并获取accumulator mapping 和 每个module所需的输出。
                                  global_accumulator_mapping, acc_grad_outvars))
         modules.append(module)
         module_accumulator_mappings.append(module_accumulator_mapping)

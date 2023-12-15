@@ -251,34 +251,30 @@ def training_dp_impl(num_layers, num_devices, num_microbatches, submesh_choices,
                        dtype=np.int32)
     f[0, num_layers, 0] = 0
     for s in range(1, num_layers + 1):  # pylint: disable=too-many-nested-blocks
-        for i in range(num_layers - 1, -1, -1):
-            for j in range(1, num_devices + 1):
-                for k in range(num_layers, i, -1):
-                    for m, submesh in enumerate(submesh_choices):
-                        n_submesh_devices = np.prod(np.array(submesh))
-                        if n_submesh_devices <= j:
+        for i in range(num_layers - 1, -1, -1):             # code i 是 paper l(k)
+            for j in range(1, num_devices + 1):             # code j 是 paper d
+                for k in range(num_layers, i, -1):          # code num_layer 是 K(L);  code i 是 l(k); 这里是 num_layers...i, L(K)...l(k); 所以 code k 是 paper dp状态方程的 i in [k, K]
+                    for m, submesh in enumerate(submesh_choices):           # submesh 是 (n_, m_), code m 表示 第m个submesh choices
+                        n_submesh_devices = np.prod(np.array(submesh))      # np.prod 是所有元素的乘积
+                        if n_submesh_devices <= j:                          # 如果 submesh 的device数量 < d(code j), 才继续，否者直接过
                             # TODO(zhuohan): This level of for loop is not
                             #   necessary. It can be optimized by sorting
                             #   the logical mesh shapes.
-                            for n_config in range(num_autosharding_configs):
-                                if s - 1 <= max_n_succ_stages[i, k - 1, m,
-                                                              n_config]:
-                                    stage_cost = compute_cost[i, k - 1, m,
-                                                              n_config]
-                                    new_cost = f[s - 1, k, j -
-                                                 n_submesh_devices] + stage_cost
-                                    if (stage_cost <= max_stage_cost and
-                                            new_cost < f[s, i, j]):
+                            for n_config in range(num_autosharding_configs):  ## 所以这个autosharding config到底是个啥/？？？？？
+                                if s - 1 <= max_n_succ_stages[i, k - 1, m, n_config]:  ## 这里测试内存的方式好像和paper也不太一样？？？
+                                    stage_cost = compute_cost[i, k - 1, m, n_config]   ## t_intra((o_k, o_i), mesh(n_s, m_s), 但是这里多了一个关于 autosharding config的循环
+                                    new_cost = f[s - 1, k, j - n_submesh_devices] + stage_cost # f[s, k, d] = f[s-1, i+1, d-n·m] + t_intra
+                                                                                               # 要动手就在这里动手！！！！！！step1. 搞明白需要哪几个变量
+                                                                                               #                          step2. 该这几个状态转移方程
+                                    
+                                    if (stage_cost <= max_stage_cost and new_cost < f[s, i, j]):   ## 若本次比上次的cost小，则更新
                                         f[s, i, j] = new_cost
-                                        f_stage_max[s, i, j] = max(
-                                            f_stage_max[s - 1, k,
-                                                        j - n_submesh_devices],
-                                            stage_cost)
+                                        f_stage_max[s, i, j] = max(f_stage_max[s - 1, k, j - n_submesh_devices], stage_cost)
                                         f_argmin[s, i, j] = (k, m, n_config)
 
     best_s = -1
     best_total_cost = np.inf
-    for s in range(1, num_layers + 1):
+    for s in range(1, num_layers + 1):                  ## 选择合适的 s
         if f[s, 0, num_devices] < best_total_cost:
             best_s = s
             best_total_cost = f[s, 0, num_devices]
@@ -286,23 +282,25 @@ def training_dp_impl(num_layers, num_devices, num_microbatches, submesh_choices,
     if np.isinf(best_total_cost):
         return np.inf, None
 
-    total_cost = f[best_s, 0, num_devices] + (
-        num_microbatches - 1) * f_stage_max[best_s, 0, num_devices]
+    total_cost = f[best_s, 0, num_devices] + (num_microbatches - 1) * f_stage_max[best_s, 0, num_devices] ## 全局最优 T* (cost)
     current_s = best_s
     current_layer = 0
     current_devices = num_devices
 
     res = []
     while current_s > 0 and current_layer < num_layers and current_devices > 0:
-        next_start_layer, submesh_choice, autosharding_choice = (
-            f_argmin[current_s, current_layer, current_devices])
+        (next_start_layer, 
+         submesh_choice, 
+         autosharding_choice) = (f_argmin[current_s, current_layer, current_devices])
         assert next_start_layer != -1 and current_devices != -1
-        res.append(((current_layer, next_start_layer), submesh_choice,
+        res.append(((current_layer, next_start_layer), 
+                    submesh_choice,
                     autosharding_choice))
         current_s -= 1
         current_layer = next_start_layer
         current_devices -= np.prod(np.array(submesh_choices[submesh_choice]))
-    assert (current_s == 0 and current_layer == num_layers and
+    assert (current_s == 0 and 
+            current_layer == num_layers and
             current_devices == 0)
 
     return total_cost, res
@@ -313,20 +311,22 @@ def training_dp(num_layers, num_devices, num_microbatches, submesh_choices,
     """Auto stage dynamic programming."""
     timers("stage-construction-dp").start()
 
-    all_possible_stage_costs = np.sort(np.unique(compute_cost))
-    best_cost = np.inf
+    all_possible_stage_costs = np.sort(np.unique(compute_cost))   ## 将所有的 t_max 按从小到大排序
+    best_cost = np.inf                                            ## T* 初始化为 inf
     best_solution = None
-    last_max_stage_cost = 0.0
+    last_max_stage_cost = 0.0                                     
     # FIXME(zhuohan): Set this gap as a tunable parameter in global config
-    gap = 1e-6
-    assert len(
-        all_possible_stage_costs), "no solution in auto stage construction."
+    gap = 1e-6                                                    ## 优化的 gap
+    
+    assert len(all_possible_stage_costs), "no solution in auto stage construction. THROW OUT by stage_constuction.py -> training_dp()" 
+    
+    ## 遍历所有的 t_max(max_stage_cost)
     for max_stage_cost in all_possible_stage_costs:
-        if max_stage_cost * num_microbatches >= best_cost:
+        if max_stage_cost * num_microbatches >= best_cost:      ## 若 B · t_max >= T*， 则 break
             break
-        if max_stage_cost - last_max_stage_cost < gap:
+        if max_stage_cost - last_max_stage_cost < gap:          ## 若这次的 tmax 和上次的 tmax 相差不超过 gap，则 continue
             continue
-        cost, solution = training_dp_impl(num_layers, num_devices,
+        cost, solution = training_dp_impl(num_layers, num_devices,          ## training_dp_impl() 实现的是 给定固定的tmax，计算最优cost和solution
                                           num_microbatches, submesh_choices,
                                           num_autosharding_configs,
                                           compute_cost, max_n_succ_stages,
@@ -422,7 +422,7 @@ def get_submesh_choices(
         return global_config.overwrite_submesh_choices
     submesh_choices = []
 
-    # smaller submeshes:
+    # smaller submeshes: 情况(1)
     i = 1
     while i <= num_devices_per_host:
         submesh_choices.append((1, i))
@@ -431,12 +431,12 @@ def get_submesh_choices(
         "Only supports the cases where num_devices_per_host is power of two, "
         f"while now num_devices_per_host = {num_devices_per_host}")
 
-    # larger meshes:
-    if space == "all":
+    # larger meshes:   情况(2) 分了三种
+    if space == "all":  # (2.1) 可以是任意个数个设备
         for i in range(2, num_hosts + 1):
             submesh_choices.append((i, num_devices_per_host))
     elif space == "power_of_two":
-        i = 2
+        i = 2          # (2.2) 可以是任意个数个设备
         while i <= num_hosts:
             submesh_choices.append((i, num_devices_per_host))
             i *= 2
@@ -458,6 +458,7 @@ def get_one_submesh_autosharding_config_choices(
     """
     Return a list of logical meshes and autosharding configs.
     Which will be used by the auto stage construction algorithm.
+    返回 逻辑mesh 和 autosharding-config 的 list。
 
     Args:
         virtual_submesh: a submesh.
@@ -469,19 +470,18 @@ def get_one_submesh_autosharding_config_choices(
     results = []
     num_devices = virtual_submesh.num_devices
     if space in ["all", "single_node_model_parallel"]:
-        if space == "all":
-            max_mp_dimension = num_devices
-        else:  # space == "single_node_model_parallel"
-            max_mp_dimension = virtual_submesh.num_devices_per_host
-
-        for mp_size in range(1, max_mp_dimension + 1):
-            if num_devices % mp_size == 0:
-                dp_size = num_devices // mp_size
-                if batch_size % dp_size == 0:
-                    results.append((virtual_submesh.get_logical_mesh(
-                        (dp_size, mp_size)), {
-                            "force_batch_dim_to_mesh_dim": 0
-                        }))
+        if space == "all":                                          # 根据space 来确定 mp 的最大维度
+            max_mp_dimension = num_devices                          #      all: mp最大维度是 虚拟mesh的设备综述
+        else:  # space == "single_node_model_parallel"              # 否则
+            max_mp_dimension = virtual_submesh.num_devices_per_host #      single_node_model_parallel: mp 只能在单节点内运行
+        ## 为什么这里把第一个维度当成 dp , 而第二个维度当成mp？？？？？？？？？
+        for mp_size in range(1, max_mp_dimension + 1):     # 从 1...max_mp_dim 遍历所有的 mp_size 
+            if num_devices % mp_size == 0:                 #    若能除尽
+                dp_size = num_devices // mp_size           #        num_devices = dp_size * mp_size
+                if batch_size % dp_size == 0:              #        # 若 batchsize 能除尽 dp_size
+                    results.append((virtual_submesh.get_logical_mesh((dp_size, mp_size)), 
+                                    {"force_batch_dim_to_mesh_dim": 0}))
+                    
         results.append((virtual_submesh.get_logical_mesh((num_devices, 1)), {}))
     elif space == "same_as_physical":
         results.append((virtual_submesh.get_logical_mesh(), {}))
@@ -499,25 +499,25 @@ def get_one_submesh_autosharding_config_choices(
     return results
 
 
-def get_all_submesh_autosharding_config_choices(virtual_mesh, submesh_choices,
-                                                space, batch_size):
+def get_all_submesh_autosharding_config_choices(virtual_mesh: VirtualPhysicalMesh, submesh_choices: List,
+                                                space: str, batch_size: int):
     """Get all possible auto sharding config choices for all possible submesh
-    shapes."""
-    # A config is: Tuple(logical_mesh_shape, autosharding_option_dict).
-    # Enumerate all (2D Mesh with force batch dim) + one (1D Mesh with mix batch
-    # dim).
+    shapes.
+    获取 所有可能的submesh_shape形状 的 所有可能的auto_sharding配置选项
+    config 是: Tuple(logical_mesh_shape, autosharding_option_dict)。 
+    枚举所有(2D Mesh with force batch dim) + 一个(1D Mesh with mix batch dim)"""
     autosharding_configs = []
-    for submesh in submesh_choices:
+    for submesh in submesh_choices:     ##  枚举所有(2D Mesh with force batch dim)
         num_hosts, num_devices_per_host = submesh
-        virtual_submesh = virtual_mesh.slice_2d(
-            tuple(range(num_hosts)),
-            (tuple(range(num_devices_per_host)),) * num_hosts)
-        submesh_autosharding_configs = (
-            get_one_submesh_autosharding_config_choices(virtual_submesh, space,
-                                                        batch_size))
-        autosharding_configs.append(submesh_autosharding_configs)
-
-    # Pad all submesh to the maximum number of configs
+        host_indices = tuple(range(num_hosts))
+        device_indices = (tuple(range(num_devices_per_host)),) * num_hosts
+        virtual_submesh = virtual_mesh.slice_2d(host_indices, device_indices)
+        submesh_autosharding_configs = (get_one_submesh_autosharding_config_choices(virtual_submesh, 
+                                                                                    space, batch_size))
+        
+        autosharding_configs.append(submesh_autosharding_configs) # 有的时候因为 batchsize 太小，batchsize % dp != 0
+                                                                  # 导致 autosharding 比较少, 如 8*8 面对 bs=32, 不存在(64, 1)
+    # Pad all submesh to the maximum number of configs            # 因为 logical view 的第一个维度是 dp的维度, bs32 没法被64个gpu并行
     max_num_autosharding_configs = max(
         len(configs) for configs in autosharding_configs)
     for configs in autosharding_configs:
@@ -613,7 +613,7 @@ def cluster_layers_and_slice_mesh(
         assert len(layers) % 2 == 0
         num_layers = len(layers) // 2
 
-    if isinstance(stage_option, AutoStageOption):
+    if isinstance(stage_option, AutoStageOption):   # 使用 DP 算法自动分配 stage 和 submesh
         if given_mesh:
             # TODO(zhuohan): Implement the auto slicing with given mesh.
             raise NotImplementedError("automatically slicing layers with "
@@ -630,7 +630,7 @@ def cluster_layers_and_slice_mesh(
         num_autosharding_configs = len(autosharding_configs[0])
 
         # Use DP to find the optimal solution.
-        compute_cost, max_n_succ_stages = get_compute_cost(
+        compute_cost, max_n_succ_stages = get_compute_cost( # 
             virtual_mesh, submesh_choices, autosharding_configs, layers,
             accumulator_mapping, acc_grad_invars, acc_grad_outvars,
             jax_apply_layers, apply_grad_global_info, num_micro_batches,
@@ -656,7 +656,7 @@ def cluster_layers_and_slice_mesh(
             submesh_choices[submesh_id] for _, submesh_id, _ in solution
         ]
         selected_autosharding_configs = [
-            autosharding_configs[submesh_id][autosharding_config_id]
+            autosharding_configs[submesh_id][autosharding_config_id]            ## 思索 autosharding_configs
             for _, submesh_id, autosharding_config_id in solution
         ]
         logical_mesh_shapes = [
@@ -771,7 +771,7 @@ def cluster_layers_and_slice_mesh(
         merged_stage = JaxPipelineComputation.from_closed_jaxpr(
             stage_name, merged_stage_jaxpr)
         merged_stages.append(merged_stage)
-    stages = merged_stages
+    stages = merged_stages  
 
     # 检查 logical mesh shapes 的合法性
     assert len(logical_mesh_shapes) == len(sliced_meshes)

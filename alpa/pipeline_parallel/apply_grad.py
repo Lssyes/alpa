@@ -361,9 +361,8 @@ def jaxpr_have_apply_grad(closed_jaxpr: ClosedJaxpr):
 def split_compute_grad_and_apply_grad(closed_jaxpr: ClosedJaxpr, gensym_fn,
                                       num_microbatch: int,
                                       inference_mode: bool):
-    """Split the train_step jaxpr into two parts: compute_grad and
-    apply_grad. These two parts are separated by a gradient marker generated
-    by `alpa.grad`."""
+    """将train_step jaxpr分成两部分：compute_grad和apply_grad。
+    这两部分由“alpa.grad”生成的 gradient marker隔开"""
     # Locate the marker
     split_eqn = None
     for idx, eqn in enumerate(closed_jaxpr.eqns):
@@ -385,7 +384,8 @@ def split_compute_grad_and_apply_grad(closed_jaxpr: ClosedJaxpr, gensym_fn,
         })
         return closed_jaxpr, closed_jaxpr, dummy_jaxpr, dummy_bound
     sliced_eqns = [
-        closed_jaxpr.eqns[:split_idx], split_eqn,
+        closed_jaxpr.eqns[:split_idx], 
+        split_eqn,
         closed_jaxpr.eqns[split_idx + 1:]
     ]
     # Some equations are not marked. This pass moves them either into apply grad or a layer.

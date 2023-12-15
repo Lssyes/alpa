@@ -14,9 +14,12 @@ from jax.tree_util import tree_flatten, tree_unflatten, PyTreeDef
 from alpa.device_mesh import init_global_cluster, shutdown_global_cluster
 from alpa.parallel_method import ParallelMethod, ShardParallel
 from alpa.pipeline_parallel.primitive_def import mark_gradient
-from alpa.util import (auto_donate_argnums, auto_static_argnums,
+from alpa.util import (auto_donate_argnums, auto_static_argnums, print_jaxpr_computation_graph,
                        abstractify_with_aval, GradFuncTransformContext)
 from alpa.version import check_alpa_jaxlib_version
+from jax.interpreters import partial_eval as pe
+from jax.core import gensym, AbstractValue, ClosedJaxpr
+import jax
 
 traceback_util.register_exclusion(__file__)
 
@@ -203,6 +206,20 @@ class ParallelizedFunc:
 
         # Compile
         abstract_args = map(abstractify_with_aval, args_flat)
+        
+        ## for DEBUG, 通过 遍历输入 利用函数 abstractify_with_aval 转换为抽象值，转换成jaxpr
+        ## 这个地方的jaxpr是不可能进行layer constuciton 的因为没有 with GradFuncTransformContext(layer_option.transform):
+        # avals = []
+        # for arg in args_flat:
+        #     avals.append(abstractify_with_aval(arg))        
+        # with jax.disable_jit():
+        #     jaxpr, _, consts = pe.trace_to_jaxpr_final(f, avals)                
+        # closed_jaxpr = ClosedJaxpr(jaxpr, consts)
+
+        # print_jaxpr_computation_graph(closed_jaxpr)
+        # print()
+                
+        
         executable = _compile_parallel_executable(f, in_tree, out_tree_hashable,
                                                   static_argnums,
                                                   donated_invars, batch_invars,
