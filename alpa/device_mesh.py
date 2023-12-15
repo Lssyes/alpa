@@ -2240,9 +2240,9 @@ class DeviceCluster:
             self.host_ips = all_host_ips
             
             ######## fake
-            self.host_info = all_host_info_fake
-            self.host_ips = all_host_ips_fake
-            self.host_num_devices = [8] * 8
+            # self.host_info = all_host_info_fake
+            # self.host_ips = all_host_ips_fake
+            # self.host_num_devices = [8] * 8
             
             
             ###### fake

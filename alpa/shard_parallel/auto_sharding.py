@@ -215,7 +215,7 @@ def run_auto_sharding_pass(
     assert hlo.is_unoptimized()
 
     multiple_stages = return_mode in ["stages", "stages_and_hook"] # single
-    num_devices = logical_mesh.num_devices # 2
+    num_devices = logical_mesh.num_devices # 64
     build_random_seed = global_config.compile_random_seed
     # 返回 XLA 编译的编译选项。
     compile_options = get_compile_options(num_replicas=1,

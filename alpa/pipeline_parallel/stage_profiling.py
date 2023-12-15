@@ -102,6 +102,7 @@ class ModuleProfileResult(
                 f"available_memory={self.available_memory / GB:.3f} GB)")
 
 
+
 class StageProfileResult:
     """Profile result of a stage."""
 
@@ -226,8 +227,8 @@ class CompileWorker:
         }
         try:
             # pylint: disable=unbalanced-tuple-unpacking
-            module_names, hlos, stage_plan = (run_auto_sharding_pass(
-                config.hlo, **other_kwargs))
+            module_names, hlos, stage_plan = (run_auto_sharding_pass(config.hlo, 
+                                                                     **other_kwargs))
         except RuntimeError as e:
             logger.warning(f"Compilation error (auto-sharding pass) "
                            f"for stage {stage_id} : {e}")
@@ -236,9 +237,9 @@ class CompileWorker:
         # Read input/output shardings
         hlo_dict = dict(zip(module_names, hlos))
 
-        assert (sum(
-            name.endswith(APPLY_GRAD_MARKER_SUFFIX) for name in config.names) <=
-                1), ("Only one apply grad module is allowed in a single stage.")
+        assert (sum(name.endswith(APPLY_GRAD_MARKER_SUFFIX) 
+                    for name in config.names)
+                <=1), ("Only one apply grad module is allowed in a single stage.")
 
         acc_grad_module_compile_outputs = []
         apply_grad_input_sharding_protos = None
@@ -283,8 +284,8 @@ class CompileWorker:
         """Run auto-sharding pass on a WrappedHlo."""
         assert other_kwargs["return_mode"] == "stages"
         # pylint: disable=unbalanced-tuple-unpacking
-        hlo_stage_names, hlo_stages, stage_plan = run_auto_sharding_pass(
-            hlo, **other_kwargs)
+        hlo_stage_names, hlo_stages, stage_plan = run_auto_sharding_pass(hlo, 
+                                                                         **other_kwargs)
         return stage_id, (hlo_stage_names, hlo_stages, stage_plan)
 
 
@@ -488,13 +489,21 @@ def compile_all(stages, num_micro_batches, default_as_option, profile_results):
     num_cpus = int(min(max(ray.available_resources()["CPU"] // 2, 
                            1), 
                        len(stages)))
-    compile_workers = CompileWorkerPool(num_cpus)
+    compile_workers = CompileWorkerPool(num_cpus) #!!!!!!!!!! debug 本地编译
     num_compiled_stages = 0
     for i, (stage_idx, stage_config, auto_sharding_config) in enumerate(stages):
         if (stage_idx in profile_results and profile_results[stage_idx].fully_profiled()):
             continue
         
         logical_mesh, autosharding_option_dict = auto_sharding_config
+        
+        #### debug!!!!!!
+        # worker = CompileWorker()
+        # worker.compile_stage_for_profiling(i, stage_config.compile_config,
+        #                                           logical_mesh,
+        #                                           dataclasses.replace(default_as_option, **autosharding_option_dict),
+        #                                           num_micro_batches)
+        
         compile_workers.submit(lambda w, v: w.compile_stage_for_profiling.remote(*v),
                                (i, stage_config.compile_config, 
                                 logical_mesh,
