@@ -10,11 +10,12 @@ from jax._src.lib import xla_extension as xe
 from jax.core import Var
 import numpy as np
 
-from alpa.device_mesh import VirtualPhysicalMesh
+from alpa.device_mesh import VirtualPhysicalMesh, get_global_paper_type
 from alpa.global_env import global_config
 from alpa.pipeline_parallel.computation import (
     JaxPipelineComputation, merge_marked_jaxprs_with_named_call)
 from alpa.pipeline_parallel.stage_profiling import (get_compute_cost,
+                                                    get_compute_cost_sub_cluster,
                                                     last_compute_cost_file_name)
 from alpa.shard_parallel.auto_sharding import AutoShardingOption
 from alpa.timer import timers
@@ -340,6 +341,40 @@ def training_dp(num_layers, num_devices, num_microbatches, submesh_choices,
     return best_cost, best_solution
 
 
+def training_dp_paper_fake(num_layers, num_microbatches, num_devices_s, submesh_choices_s,
+                           num_autosharding_configs_s, compute_cost_s, max_n_succ_stages_s):
+    """Auto stage dynamic programming."""
+    timers("stage-construction-dp").start()
+
+    all_possible_stage_costs = np.sort(np.unique(compute_cost))   ## 将所有的 t_max 按从小到大排序
+    best_cost = np.inf                                            ## T* 初始化为 inf
+    best_solution = None
+    last_max_stage_cost = 0.0                                     
+    # FIXME(zhuohan): Set this gap as a tunable parameter in global config
+    gap = 1e-6                                                    ## 优化的 gap
+    
+    assert len(all_possible_stage_costs), "no solution in auto stage construction. THROW OUT by stage_constuction.py -> training_dp()" 
+    
+    ## 遍历所有的 t_max(max_stage_cost)
+    for max_stage_cost in all_possible_stage_costs:
+        if max_stage_cost * num_microbatches >= best_cost:      ## 若 B · t_max >= T*， 则 break
+            break
+        if max_stage_cost - last_max_stage_cost < gap:          ## 若这次的 tmax 和上次的 tmax 相差不超过 gap，则 continue
+            continue
+        cost, solution = training_dp_impl(num_layers, num_devices,          ## training_dp_impl() 实现的是 给定固定的tmax，计算最优cost和solution
+                                          num_microbatches, submesh_choices,
+                                          num_autosharding_configs,
+                                          compute_cost, max_n_succ_stages,
+                                          max_stage_cost)
+        if cost < best_cost:
+            best_cost = cost
+            best_solution = solution
+        last_max_stage_cost = max_stage_cost
+
+    timers("stage-construction-dp").stop()
+    return best_cost, best_solution
+
+
 @maybe_numba_jit
 def inference_dp_impl(num_layers, num_devices, submesh_choices,
                       num_autosharding_configs, compute_cost):
@@ -567,7 +602,7 @@ def get_sliced_virtual_submeshes(virtual_mesh, submesh_shapes):
 
 def cluster_layers_and_slice_mesh(
         layers: Sequence[JaxPipelineComputation],
-        virtual_mesh: VirtualPhysicalMesh, accumulator_mapping: Dict[Var, Var],
+        virtual_mesh: VirtualPhysicalMesh or list, accumulator_mapping: Dict[Var, Var],
         acc_grad_invars: Sequence[Var], acc_grad_outvars: Sequence[Var],
         num_micro_batches: int, batch_size: int,
         jax_apply_layers: Sequence[JaxPipelineComputation],
@@ -599,197 +634,252 @@ def cluster_layers_and_slice_mesh(
         stage_option: The options controling how to construct stages.
     """
     timers("stage-construction").start()
+    # 
+    if get_global_paper_type() == "raw_alpa":
 
-    inference_mode = (pipeline_schedule == "inference") # 是否是推理模式
-    if virtual_mesh.launched_physical_mesh_group is None:
-        given_mesh = False
-    else:
-        given_mesh = True
+        inference_mode = (pipeline_schedule == "inference") # 是否是推理模式
+        if virtual_mesh.launched_physical_mesh_group is None:
+            given_mesh = False
+        else:
+            given_mesh = True
 
-    if inference_mode:
-        num_layers = len(layers)
-    else:
-        # Assume each forward layer corresponds to a backward layer
+        if inference_mode:
+            num_layers = len(layers)
+        else:
+            # Assume each forward layer corresponds to a backward layer
+            assert len(layers) % 2 == 0
+            num_layers = len(layers) // 2
+
+        if isinstance(stage_option, AutoStageOption):   # 使用 DP 算法自动分配 stage 和 submesh
+            if given_mesh:
+                # TODO(zhuohan): Implement the auto slicing with given mesh.
+                raise NotImplementedError("automatically slicing layers with "
+                                        "existing physical meshes is not"
+                                        "supported yet.")
+
+            submesh_choices = get_submesh_choices(
+                virtual_mesh.num_hosts, virtual_mesh.num_devices_per_host,
+                stage_option.submesh_physical_shape_space,
+                stage_option.manually_specified_submeshes)
+            autosharding_configs = get_all_submesh_autosharding_config_choices(         # 获取所有 submesh 的 autosharding_config "choises"??
+                virtual_mesh, submesh_choices,
+                stage_option.submesh_logical_shape_space, batch_size)
+            num_autosharding_configs = len(autosharding_configs[0])
+
+            # Use DP to find the optimal solution.
+            compute_cost, max_n_succ_stages = get_compute_cost( # 
+                virtual_mesh, submesh_choices, autosharding_configs, layers,
+                accumulator_mapping, acc_grad_invars, acc_grad_outvars,
+                jax_apply_layers, apply_grad_global_info, num_micro_batches,
+                default_as_option, stage_option, inference_mode)
+            if inference_mode:
+                _, solution = inference_dp(num_layers, virtual_mesh.num_devices,
+                                        submesh_choices,
+                                        num_autosharding_configs, compute_cost)
+            else:
+                _, solution = training_dp(num_layers, virtual_mesh.num_devices,
+                                        num_micro_batches, submesh_choices,
+                                        num_autosharding_configs, compute_cost,
+                                        max_n_succ_stages)
+
+            assert solution is not None, "no solution in auto stage construction."
+
+            # Parse solution
+            forward_stage_layer_ids = [
+                list(range(start_id, end_id))
+                for (start_id, end_id), _, _ in solution
+            ]
+            submesh_shapes = [
+                submesh_choices[submesh_id] for _, submesh_id, _ in solution
+            ]
+            selected_autosharding_configs = [
+                autosharding_configs[submesh_id][autosharding_config_id]            ## 思索 autosharding_configs
+                for _, submesh_id, autosharding_config_id in solution
+            ]
+            logical_mesh_shapes = [
+                mesh.shape for mesh, _ in selected_autosharding_configs
+            ]
+            autosharding_option_dicts = [
+                option_dict for _, option_dict in selected_autosharding_configs
+            ]
+
+            # Print and store the results
+            print("Result forward_stage_layer_ids:", forward_stage_layer_ids)
+            print("Result mesh_shapes:", submesh_shapes)
+            print("Result logical_mesh_shapes:", logical_mesh_shapes)
+            print("Result autosharding_option_dicts:", autosharding_option_dicts)
+            global last_forward_stage_layer_ids, last_submesh_shapes
+            global last_logical_mesh_shapes, last_autosharding_option_dicts
+            last_forward_stage_layer_ids = forward_stage_layer_ids
+            last_submesh_shapes = submesh_shapes
+            last_logical_mesh_shapes = logical_mesh_shapes
+            last_autosharding_option_dicts = autosharding_option_dicts
+        elif isinstance(stage_option, ManualStageOption):
+            # Check forward_stage_layer_ids is a partition of range(num_layers)
+            forward_stage_layer_ids = stage_option.forward_stage_layer_ids
+            last_layer_id = 0
+            for stage_layer_ids in forward_stage_layer_ids:
+                for layer_id in stage_layer_ids:
+                    assert layer_id == last_layer_id
+                    last_layer_id += 1
+            assert last_layer_id == num_layers, (f"{last_layer_id} layers in stage option, but {num_layers} marked")
+            submesh_shapes = stage_option.submesh_physical_shapes
+            logical_mesh_shapes = (stage_option.submesh_logical_shapes or submesh_shapes)
+            autosharding_option_dicts = (stage_option.submesh_autosharding_option_dicts)
+        elif isinstance(stage_option, UniformStageOption):
+            # 本 MLP 手动划分例子, 走的Uniform 这个分枝
+            num_stages = stage_option.num_stages or num_layers
+            if stage_option.submesh_physical_shape is not None:
+                assert stage_option.submesh_logical_shape is not None
+                submesh_logical_shape = stage_option.submesh_logical_shape
+                submesh_shapes = [stage_option.submesh_physical_shape] * num_stages
+                logical_mesh_shapes = [submesh_logical_shape] * num_stages
+                assert virtual_mesh.num_devices == np.prod(submesh_logical_shape) * num_stages
+                forward_stage_layer_ids = _cluster_layers_with_even_tflops(layers[:num_layers], num_stages)
+                autosharding_option = stage_option.submesh_autosharding_option
+                if autosharding_option is None:
+                    autosharding_option = {}
+                autosharding_option_dicts = [autosharding_option] * num_stages
+            else:
+                # 本 MLP 手动划分例子,  未提供 submesh 的物理shape
+                if given_mesh:
+                    submesh_shapes = [
+                        x.shape
+                        for x in virtual_mesh.launched_physical_mesh_group.meshes
+                    ]
+                    logical_mesh_shapes = submesh_shapes
+                else:
+                    # 本 MLP 手动划分例子,  未 given_mesh
+                    num_devices = virtual_mesh.num_devices
+
+                    assert num_devices >= num_stages, "No enough devices"   # 要求 device数量 > stage数量
+                    assert num_devices % num_stages == 0                    # 要求 device数量 可以整除 stage数量
+                    num_devices_per_mesh = num_devices // num_stages        # 计算 每个Mesh分配的 device数量
+                    if num_devices_per_mesh > virtual_mesh.num_devices_per_host:    # 如果 每个Mesh的Device数量 > 每个node的device ********
+                        assert (num_devices_per_mesh % virtual_mesh.num_devices_per_host == 0)  # 则要求 前者能整除后者
+                        submesh_shape = (num_devices_per_mesh //                    #             子网的形状 -> 横向占用一个node的所有device
+                                        virtual_mesh.num_devices_per_host,         #                       -> 纵向根据 每个mesh的device数量
+                                        virtual_mesh.num_devices_per_host)         #                       -> 选择2 (n, M) 行满
+                    else:               
+                        assert (virtual_mesh.num_devices_per_host %                 # 否则:        
+                                num_devices_per_mesh == 0)                          #           每个 node的device数量 必须整除 每个Mesh的Device
+                        submesh_shape = (1, num_devices_per_mesh)                   #           子网形状 -> 选择1 (1, 2^n)
+                    submesh_shapes = [submesh_shape] * num_stages                   # 同构 Submesh ???????  [(1,2),(1,2)]
+                    logical_mesh_shapes = [submesh_shape] * num_stages              # 逻辑mesh形状 与上值相同
+
+                forward_stage_layer_ids = [[i] for i in range(num_layers)]          # [[0], [1]]
+                autosharding_option_dicts = [{}] * num_stages
+        else:
+            raise ValueError(f"Invalid pipeline stage option: {stage_option}")
+
+        if given_mesh:
+            sliced_meshes = [mesh.get_virtual_physical_mesh()
+                            for mesh in virtual_mesh.launched_physical_mesh_group]
+        else:
+            sliced_meshes = get_sliced_virtual_submeshes(virtual_mesh,
+                                                        submesh_shapes)
+
+        num_forward_stages = len(forward_stage_layer_ids)
+
+        if inference_mode:
+            stage_layer_ids = forward_stage_layer_ids
+            stage_to_mesh = list(range(num_forward_stages))
+        else:
+            backward_stage_layer_ids = [[2 * num_layers - 1 - i for i in reversed(layer_ids)]               # 进行一些 ids 操作
+                                        for layer_ids in reversed(forward_stage_layer_ids)]                 # 生成了 backward_ids 和 stage_ids
+            stage_layer_ids = forward_stage_layer_ids + backward_stage_layer_ids
+            stage_to_mesh = list(range(num_forward_stages)) + list(reversed(range(num_forward_stages)))
+
+        stage_outvars = get_stage_outvars(layers, stage_layer_ids, acc_grad_outvars)                        # list, 每个stage 的 outVars
+        merged_stages = []
+        for stage_id, layer_ids in enumerate(stage_layer_ids):                                              ## 这里感觉很关键？？？？好像例子不太满足直接 continue 了
+            if len(layer_ids) == 1:
+                merged_stages.append(layers[layer_ids[0]])
+                continue
+
+            stage_layer_jaxprs = [layers[i].closed_jaxpr() for i in layer_ids]
+            stage_name = str(stage_id)
+            merged_stage_jaxpr = merge_marked_jaxprs_with_named_call(
+                stage_layer_jaxprs,
+                stage_outvars[stage_id],
+                accumulator_mapping,
+                stage_name,
+                wrap_with_marker=True)
+            merged_stage = JaxPipelineComputation.from_closed_jaxpr(
+                stage_name, merged_stage_jaxpr)
+            merged_stages.append(merged_stage)
+        stages = merged_stages  
+
+        # 检查 logical mesh shapes 的合法性
+        assert len(logical_mesh_shapes) == len(sliced_meshes)
+        for logical_mesh_shape, submesh in zip(logical_mesh_shapes, sliced_meshes):
+            assert np.prod(logical_mesh_shape) == submesh.num_devices
+
+        if autosharding_option_dicts is not None:
+            assert len(autosharding_option_dicts) == len(sliced_meshes)
+        else:
+            autosharding_option_dicts = [{}] * len(sliced_meshes)
+
+        manual_stage_option = ManualStageOption(forward_stage_layer_ids,                            # 1. 每个 forward stage 的 Layer IDs .
+                                                tuple(x.shape for x in sliced_meshes),              # 2. 每个 stage的submesh 的物理shape
+                                                logical_mesh_shapes, autosharding_option_dicts)     # 3. 每个 stage的submesh 的逻辑shape
+                                                                                                    # 4. 每个 stage的 auto-sharding options
+        timers("stage-construction").stop()
+        return stages, stage_to_mesh, sliced_meshes, manual_stage_option
+    elif get_global_paper_type() == "paper":
+        
         assert len(layers) % 2 == 0
         num_layers = len(layers) // 2
-
-    if isinstance(stage_option, AutoStageOption):   # 使用 DP 算法自动分配 stage 和 submesh
-        if given_mesh:
-            # TODO(zhuohan): Implement the auto slicing with given mesh.
-            raise NotImplementedError("automatically slicing layers with "
-                                      "existing physical meshes is not"
-                                      "supported yet.")
-
-        submesh_choices = get_submesh_choices(
-            virtual_mesh.num_hosts, virtual_mesh.num_devices_per_host,
-            stage_option.submesh_physical_shape_space,
-            stage_option.manually_specified_submeshes)
-        autosharding_configs = get_all_submesh_autosharding_config_choices(         # 获取所有 submesh 的 autosharding_config "choises"??
-            virtual_mesh, submesh_choices,
-            stage_option.submesh_logical_shape_space, batch_size)
-        num_autosharding_configs = len(autosharding_configs[0])
-
-        # Use DP to find the optimal solution.
-        compute_cost, max_n_succ_stages = get_compute_cost( # 
-            virtual_mesh, submesh_choices, autosharding_configs, layers,
-            accumulator_mapping, acc_grad_invars, acc_grad_outvars,
-            jax_apply_layers, apply_grad_global_info, num_micro_batches,
-            default_as_option, stage_option, inference_mode)
-        if inference_mode:
-            _, solution = inference_dp(num_layers, virtual_mesh.num_devices,
-                                       submesh_choices,
-                                       num_autosharding_configs, compute_cost)
-        else:
-            _, solution = training_dp(num_layers, virtual_mesh.num_devices,
-                                      num_micro_batches, submesh_choices,
-                                      num_autosharding_configs, compute_cost,
-                                      max_n_succ_stages)
+        
+        ## 获取所有 subMesh 的 shape
+        submesh_choices_0 = get_submesh_choices(
+                virtual_mesh[0].num_hosts, virtual_mesh[0].num_devices_per_host,
+                stage_option.submesh_physical_shape_space,
+                stage_option.manually_specified_submeshes)
+        submesh_choices_1 = get_submesh_choices(
+                virtual_mesh[1].num_hosts, virtual_mesh[1].num_devices_per_host,
+                stage_option.submesh_physical_shape_space,
+                stage_option.manually_specified_submeshes)
+        
+        ## 获取所有的 autosharding_config
+        autosharding_configs_0 = get_all_submesh_autosharding_config_choices(         # 获取所有 submesh 的 autosharding_config "choises"??
+                virtual_mesh[0], submesh_choices_0,
+                stage_option.submesh_logical_shape_space, batch_size)
+        
+        autosharding_configs_1 = get_all_submesh_autosharding_config_choices(         # 获取所有 submesh 的 autosharding_config "choises"??
+                virtual_mesh[1], submesh_choices_1,
+                stage_option.submesh_logical_shape_space, batch_size)
+        
+        num_autosharding_configs_0 = len(autosharding_configs_0[0])
+        num_autosharding_configs_1 = len(autosharding_configs_1[0])
+        
+        ## alg 的第一个大 for
+        compute_cost_0, max_n_succ_stages_0 = get_compute_cost_sub_cluster( # 
+                virtual_mesh[0], submesh_choices_0, autosharding_configs_0, layers,
+                accumulator_mapping, acc_grad_invars, acc_grad_outvars,
+                jax_apply_layers, apply_grad_global_info, num_micro_batches,
+                default_as_option, stage_option, inference_mode=False)
+        
+        compute_cost_1, max_n_succ_stages_1 = get_compute_cost_sub_cluster( # 
+                virtual_mesh[1], submesh_choices_1, autosharding_configs_1, layers,
+                accumulator_mapping, acc_grad_invars, acc_grad_outvars,
+                jax_apply_layers, apply_grad_global_info, num_micro_batches,
+                default_as_option, stage_option, inference_mode=False)
+         
+        ## alg 的第二个大 for ######!!!!!!
+        _, solution = training_dp_paper_fake(num_layers, num_micro_batches, 
+                                            [virtual_mesh[0].num_devices, virtual_mesh[1].num_devices],
+                                            [submesh_choices_0, submesh_choices_1],
+                                            [num_autosharding_configs_0, num_autosharding_configs_1], 
+                                            [compute_cost_0, compute_cost_1],
+                                            [max_n_succ_stages_0, max_n_succ_stages_1])
 
         assert solution is not None, "no solution in auto stage construction."
-
-        # Parse solution
-        forward_stage_layer_ids = [
-            list(range(start_id, end_id))
-            for (start_id, end_id), _, _ in solution
-        ]
-        submesh_shapes = [
-            submesh_choices[submesh_id] for _, submesh_id, _ in solution
-        ]
-        selected_autosharding_configs = [
-            autosharding_configs[submesh_id][autosharding_config_id]            ## 思索 autosharding_configs
-            for _, submesh_id, autosharding_config_id in solution
-        ]
-        logical_mesh_shapes = [
-            mesh.shape for mesh, _ in selected_autosharding_configs
-        ]
-        autosharding_option_dicts = [
-            option_dict for _, option_dict in selected_autosharding_configs
-        ]
-
-        # Print and store the results
-        print("Result forward_stage_layer_ids:", forward_stage_layer_ids)
-        print("Result mesh_shapes:", submesh_shapes)
-        print("Result logical_mesh_shapes:", logical_mesh_shapes)
-        print("Result autosharding_option_dicts:", autosharding_option_dicts)
-        global last_forward_stage_layer_ids, last_submesh_shapes
-        global last_logical_mesh_shapes, last_autosharding_option_dicts
-        last_forward_stage_layer_ids = forward_stage_layer_ids
-        last_submesh_shapes = submesh_shapes
-        last_logical_mesh_shapes = logical_mesh_shapes
-        last_autosharding_option_dicts = autosharding_option_dicts
-    elif isinstance(stage_option, ManualStageOption):
-        # Check forward_stage_layer_ids is a partition of range(num_layers)
-        forward_stage_layer_ids = stage_option.forward_stage_layer_ids
-        last_layer_id = 0
-        for stage_layer_ids in forward_stage_layer_ids:
-            for layer_id in stage_layer_ids:
-                assert layer_id == last_layer_id
-                last_layer_id += 1
-        assert last_layer_id == num_layers, (f"{last_layer_id} layers in stage option, but {num_layers} marked")
-        submesh_shapes = stage_option.submesh_physical_shapes
-        logical_mesh_shapes = (stage_option.submesh_logical_shapes or submesh_shapes)
-        autosharding_option_dicts = (stage_option.submesh_autosharding_option_dicts)
-    elif isinstance(stage_option, UniformStageOption):
-        # 本 MLP 手动划分例子, 走的Uniform 这个分枝
-        num_stages = stage_option.num_stages or num_layers
-        if stage_option.submesh_physical_shape is not None:
-            assert stage_option.submesh_logical_shape is not None
-            submesh_logical_shape = stage_option.submesh_logical_shape
-            submesh_shapes = [stage_option.submesh_physical_shape] * num_stages
-            logical_mesh_shapes = [submesh_logical_shape] * num_stages
-            assert virtual_mesh.num_devices == np.prod(submesh_logical_shape) * num_stages
-            forward_stage_layer_ids = _cluster_layers_with_even_tflops(layers[:num_layers], num_stages)
-            autosharding_option = stage_option.submesh_autosharding_option
-            if autosharding_option is None:
-                autosharding_option = {}
-            autosharding_option_dicts = [autosharding_option] * num_stages
-        else:
-            # 本 MLP 手动划分例子,  未提供 submesh 的物理shape
-            if given_mesh:
-                submesh_shapes = [
-                    x.shape
-                    for x in virtual_mesh.launched_physical_mesh_group.meshes
-                ]
-                logical_mesh_shapes = submesh_shapes
-            else:
-                # 本 MLP 手动划分例子,  未 given_mesh
-                num_devices = virtual_mesh.num_devices
-
-                assert num_devices >= num_stages, "No enough devices"   # 要求 device数量 > stage数量
-                assert num_devices % num_stages == 0                    # 要求 device数量 可以整除 stage数量
-                num_devices_per_mesh = num_devices // num_stages        # 计算 每个Mesh分配的 device数量
-                if num_devices_per_mesh > virtual_mesh.num_devices_per_host:    # 如果 每个Mesh的Device数量 > 每个node的device ********
-                    assert (num_devices_per_mesh % virtual_mesh.num_devices_per_host == 0)  # 则要求 前者能整除后者
-                    submesh_shape = (num_devices_per_mesh //                    #             子网的形状 -> 横向占用一个node的所有device
-                                     virtual_mesh.num_devices_per_host,         #                       -> 纵向根据 每个mesh的device数量
-                                     virtual_mesh.num_devices_per_host)         #                       -> 选择2 (n, M) 行满
-                else:               
-                    assert (virtual_mesh.num_devices_per_host %                 # 否则:        
-                            num_devices_per_mesh == 0)                          #           每个 node的device数量 必须整除 每个Mesh的Device
-                    submesh_shape = (1, num_devices_per_mesh)                   #           子网形状 -> 选择1 (1, 2^n)
-                submesh_shapes = [submesh_shape] * num_stages                   # 同构 Submesh ???????  [(1,2),(1,2)]
-                logical_mesh_shapes = [submesh_shape] * num_stages              # 逻辑mesh形状 与上值相同
-
-            forward_stage_layer_ids = [[i] for i in range(num_layers)]          # [[0], [1]]
-            autosharding_option_dicts = [{}] * num_stages
+        
+        pass
     else:
-        raise ValueError(f"Invalid pipeline stage option: {stage_option}")
-
-    if given_mesh:
-        sliced_meshes = [mesh.get_virtual_physical_mesh()
-                         for mesh in virtual_mesh.launched_physical_mesh_group]
-    else:
-        sliced_meshes = get_sliced_virtual_submeshes(virtual_mesh,
-                                                     submesh_shapes)
-
-    num_forward_stages = len(forward_stage_layer_ids)
-
-    if inference_mode:
-        stage_layer_ids = forward_stage_layer_ids
-        stage_to_mesh = list(range(num_forward_stages))
-    else:
-        backward_stage_layer_ids = [[2 * num_layers - 1 - i for i in reversed(layer_ids)]               # 进行一些 ids 操作
-                                    for layer_ids in reversed(forward_stage_layer_ids)]                 # 生成了 backward_ids 和 stage_ids
-        stage_layer_ids = forward_stage_layer_ids + backward_stage_layer_ids
-        stage_to_mesh = list(range(num_forward_stages)) + list(reversed(range(num_forward_stages)))
-
-    stage_outvars = get_stage_outvars(layers, stage_layer_ids, acc_grad_outvars)                        # list, 每个stage 的 outVars
-    merged_stages = []
-    for stage_id, layer_ids in enumerate(stage_layer_ids):                                              ## 这里感觉很关键？？？？好像例子不太满足直接 continue 了
-        if len(layer_ids) == 1:
-            merged_stages.append(layers[layer_ids[0]])
-            continue
-
-        stage_layer_jaxprs = [layers[i].closed_jaxpr() for i in layer_ids]
-        stage_name = str(stage_id)
-        merged_stage_jaxpr = merge_marked_jaxprs_with_named_call(
-            stage_layer_jaxprs,
-            stage_outvars[stage_id],
-            accumulator_mapping,
-            stage_name,
-            wrap_with_marker=True)
-        merged_stage = JaxPipelineComputation.from_closed_jaxpr(
-            stage_name, merged_stage_jaxpr)
-        merged_stages.append(merged_stage)
-    stages = merged_stages  
-
-    # 检查 logical mesh shapes 的合法性
-    assert len(logical_mesh_shapes) == len(sliced_meshes)
-    for logical_mesh_shape, submesh in zip(logical_mesh_shapes, sliced_meshes):
-        assert np.prod(logical_mesh_shape) == submesh.num_devices
-
-    if autosharding_option_dicts is not None:
-        assert len(autosharding_option_dicts) == len(sliced_meshes)
-    else:
-        autosharding_option_dicts = [{}] * len(sliced_meshes)
-
-    manual_stage_option = ManualStageOption(forward_stage_layer_ids,                            # 1. 每个 forward stage 的 Layer IDs .
-                                            tuple(x.shape for x in sliced_meshes),              # 2. 每个 stage的submesh 的物理shape
-                                            logical_mesh_shapes, autosharding_option_dicts)     # 3. 每个 stage的submesh 的逻辑shape
-                                                                                                # 4. 每个 stage的 auto-sharding options
-    timers("stage-construction").stop()
-    return stages, stage_to_mesh, sliced_meshes, manual_stage_option
-
+        assert False, "cluster_layers_and_slice_mesh 的 get_global_paper_type 返回了不正确结果"
+        raise NotImplementedError()
 
 def get_stage_outvars(layers: Sequence[JaxPipelineComputation],
                       layer_assignment, global_outvars) -> List[OrderedSet]:

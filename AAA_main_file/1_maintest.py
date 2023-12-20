@@ -11,11 +11,11 @@ import optax
 import ray
 from alpa.util import benchmark_func, trace_jaxpr_with_micro_batch, print_jaxpr_computation_graph
 
-alpa.util.disable_tqdm_globally()
-a = alpa.init(cluster="ray")
+# alpa.util.disable_tqdm_globally()
+# a = alpa.init(cluster="ray")
+a = alpa.init(cluster="ray", cluster_num=2)
 
-
-
+# python 中，不同的ray集群如何通信
 
 class MaunulModelPipeline(nn.Module):
     hidden_dim: int
@@ -23,11 +23,11 @@ class MaunulModelPipeline(nn.Module):
     @nn.compact
     def __call__(self, x):
         x = nn.Dense(features=self.hidden_dim)(x)
+        x = nn.Dense(features=self.hidden_dim)(x)
+        x = nn.Dense(features=self.hidden_dim)(x)
+        # # x = nn.relu(x)
         # x = nn.Dense(features=self.hidden_dim)(x)
-        # x = nn.Dense(features=self.hidden_dim)(x)
-        # x = nn.relu(x)
-        # x = nn.Dense(features=self.hidden_dim)(x)
-        # x = nn.relu(x)
+        # # x = nn.relu(x)
         # x = nn.Dense(features=self.hidden_dim)(x)
         # x = nn.Dense(features=self.hidden_dim)(x)
         # x = nn.Dense(features=self.hidden_dim)(x)
@@ -61,8 +61,8 @@ tx = optax.sgd(learning_rate=1e-3)
 state = TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
 
-print(params)
-print(jax.tree_util.tree_map(lambda x: x.shape, params))
+# print(params)
+# print(jax.tree_util.tree_map(lambda x: x.shape, params))
 
 
 
@@ -82,42 +82,42 @@ print(jax.tree_util.tree_map(lambda x: x.shape, params))
 
 
 
-# @alpa.parallelize(method=alpa.PipeshardParallel(num_micro_batches=16,
-#                                                 layer_option=alpa.AutoLayerOption(layer_num=1),
-#                                                 stage_option="auto"))
-# def MaunulModelPipeline_TrainStep(state, batch):
-#     def loss(params):
-#         out = state.apply_fn(params, batch["x"])
-#         loss = jnp.mean((batch["y"] - out)**2)
-#         return loss
-#     grads = alpa.grad(loss)(state.params) #####  这个地方切换 jax.grad
-#     new_state = state.apply_gradients(grads=grads)
-#     return new_state
-
-fake_params = [jnp.ones((dim, dim)) for _ in range(64)]
-
 @alpa.parallelize(method=alpa.PipeshardParallel(num_micro_batches=16,
-                                                layer_option=alpa.AutoLayerOption(layer_num=6),
+                                                layer_option=alpa.AutoLayerOption(layer_num=3),
                                                 stage_option="auto"))
-def fake_Trainstep(fake_params, batch):
-    def loss(fake_params):
-        # out = state.apply_fn(params, batch["x"])
-        out = jax.lax.dot(batch["x"], fake_params[0])
-        for i, param in enumerate(fake_params):
-            if(i==0):
-                continue
-            out = jax.lax.dot(out, param)
+def MaunulModelPipeline_TrainStep(state, batch):
+    def loss(params):
+        out = state.apply_fn(params, batch["x"])
         loss = jnp.mean((batch["y"] - out)**2)
         return loss
-    alpa.grad(loss)(fake_params) #####  这个地方切换 jax.grad
-    # new_state = state.apply_gradients(grads=grads)
-    return 0
+    grads = alpa.grad(loss)(state.params) #####  这个地方切换 jax.grad
+    new_state = state.apply_gradients(grads=grads)
+    return new_state
+
+# fake open
+# fake_params = [jnp.ones((dim, dim)) for _ in range(64)]
+# @alpa.parallelize(method=alpa.PipeshardParallel(num_micro_batches=16,
+#                                                 layer_option=alpa.AutoLayerOption(layer_num=6),
+#                                                 stage_option="auto"))
+# def fake_Trainstep(fake_params, batch):
+#     def loss(fake_params):
+#         # out = state.apply_fn(params, batch["x"])
+#         out = jax.lax.dot(batch["x"], fake_params[0])
+#         for i, param in enumerate(fake_params):
+#             if(i==0):
+#                 continue
+#             out = jax.lax.dot(out, param)
+#         loss = jnp.mean((batch["y"] - out)**2)
+#         return loss
+#     alpa.grad(loss)(fake_params) #####  这个地方切换 jax.grad
+#     # new_state = state.apply_gradients(grads=grads)
+#     return 0
 
 
 batch = {"x": x, "y": y}
 
-
-fake_Trainstep(fake_params, batch)
+# fake open
+# fake_Trainstep(fake_params, batch)
 
 
 print()
@@ -126,7 +126,7 @@ import time
 import numpy as np
 def alpa_execution():
     global state
-    # state = MaunulModelPipeline_TrainStep(state, batch)
+    state = MaunulModelPipeline_TrainStep(state, batch)
 def sync_func():
     # jax.local_devices()[0].synchronize_all_activity()
     jax.device_put(0.).block_until_ready()

@@ -1591,10 +1591,20 @@ def retrieve_placement_group():
 
     # case 2:
     # Get the placement group created when alpa.init('ray')
-    global_cluster = device_mesh.global_cluster
+    # if device_mesh.get_global_paper_type() == "raw_alpa":
+    #     global_cluster = device_mesh.global_cluster 
+    #     if global_cluster and global_cluster.placement_group:
+    #         alpa_placement_group = global_cluster.placement_group
+    #         return alpa_placement_group
+    # elif device_mesh.get_global_paper_type() == "paper": ## == "paper"
+    #     return virtual_mesh.parent.placement_group
+    # else:
+    #     assert False
+    global_cluster = device_mesh.global_cluster 
     if global_cluster and global_cluster.placement_group:
         alpa_placement_group = global_cluster.placement_group
         return alpa_placement_group
+        
 
     raise ValueError(
         "The alpa training is not inside the ray tasks or actor or "

@@ -406,8 +406,8 @@ class ProfileWorkerPool(BaseWorkerPoolWrapper):
         super().__init__()
         worker_cls = ray.remote(ProfileWorker)
         self.actors = [
-            worker_cls.options(placement_group=placement_group).remote(mesh)
-            for mesh in virtual_meshes
+            worker_cls.options(placement_group=placement_group).remote(mesh)        # 怀疑这里的 placement_group 是个整体, 这里mesh是VirtualPhysicalMesh
+            for mesh in virtual_meshes                                              # 而 virtual_meshes 是 list[VirtualPhysicalMesh]
         ]
         self.pool = ActorPool(self.actors)
 
@@ -1337,6 +1337,107 @@ def get_compute_cost(
 
     return compute_cost, max_n_succ_stages
 
+
+def get_compute_cost_sub_cluster(
+        virtual_mesh: VirtualPhysicalMesh,
+        submesh_choices: Sequence[Tuple[int]],
+        autosharding_configs: Sequence[Sequence[Tuple[LogicalDeviceMesh,
+                                                      dict]]],
+        layers: Sequence[JaxPipelineComputation],
+        accumulator_mapping: Dict[Var, Var],
+        acc_grad_invars: Sequence[Var],
+        acc_grad_outvars: Sequence[Var],
+        apply_grad_layers: Sequence[JaxPipelineComputation],
+        apply_grad_global_info: Tuple,
+        num_micro_batches: int,
+        default_as_option: AutoShardingOption,
+        auto_stage_option: "AutoStageOption",
+        inference_mode: bool = False):
+    
+    cluster_size = virtual_mesh.num_devices
+    layer_flops_prefix_sum = _get_layer_flops_prefix_sum(layers)   # 此处获得的是一个前缀和 1...12 表示 layer0-11, 0表示开头
+    
+    assert len(layers) % 2 == 0
+    num_layers = len(layers) // 2
+    
+    num_submesh_choices = len(submesh_choices)
+    num_autosharding_configs = len(autosharding_configs[0])
+
+    if auto_stage_option.cached_profile_result is not None:
+        with open(auto_stage_option.cached_profile_result, "rb") as f:
+            profile_results = pickle.load(f)
+    else:
+        profile_results = {}
+    print("-" * 20 + " Automatic stage clustering " + "-" * 20)
+    print(f"submesh_choices: {submesh_choices}")
+
+    # Reverse submesh_choices to test larger meshes first
+    for mesh_id, submesh in reversed(list(enumerate(submesh_choices))):
+        print(f"- Profiling for submesh {mesh_id} {submesh}:")
+        num_hosts, num_devices_per_host = submesh
+        tic = time()
+        
+        sliced_virtual_meshes = virtual_mesh.slice_profiling_submeshes(num_hosts, num_devices_per_host)
+
+        if auto_stage_option.layer_profile_mode == "composition":
+            stages = generate_training_stages_2d(       ## 生成 2d 的 trainning stage
+                layers, layer_flops_prefix_sum, accumulator_mapping,
+                acc_grad_invars, acc_grad_outvars, apply_grad_layers,
+                apply_grad_global_info, mesh_id,
+                autosharding_configs[mesh_id],
+                sliced_virtual_meshes[0].num_devices, cluster_size,
+                auto_stage_option.stage_imbalance_tolerance)
+        else:
+            raise ValueError(f"Unknown layer profile mode: "
+                             f"{auto_stage_option.layer_profile_mode}")
+            
+
+        check_profile_results_consistent(stages, profile_results)       # 这里如果有缓存catch 的profiliing就直接读取了
+
+        profile_results = distributed_profile_on_mesh(                  # 在 mesh 上 profile！！！！！！！！！！！！！！！！！！！！！！！！！
+            stages, sliced_virtual_meshes, num_micro_batches, default_as_option, #！@！！！！！！
+            auto_stage_option, profile_results)
+
+        toc = time()
+        print(f"Profiling for submesh {mesh_id} {submesh} takes {toc - tic:.2f}"
+              f" seconds")
+        print("-" * 50)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    profile_result_file_name = (f"profile-results-{timestamp}.npy")
+    np.save(profile_result_file_name, profile_results)
+    global last_compute_cost_file_name
+    last_compute_cost_file_name = profile_result_file_name
+    print(f"Profile result saved to: {profile_result_file_name}")
+    print("-" * 70)
+
+    if auto_stage_option.layer_profile_mode == "composition":
+        if inference_mode:
+            compute_cost, _ = interpret_profile_result_inference_2d(
+                profile_results, num_layers, num_submesh_choices,
+                num_autosharding_configs)
+            max_n_succ_stages = None
+        else:
+            (compute_cost,
+             max_n_succ_stages) = interpret_profile_result_training_2d(
+                 profile_results, num_layers, num_submesh_choices,
+                 num_autosharding_configs)
+    elif auto_stage_option.layer_profile_mode == "individual":
+        if inference_mode:
+            compute_cost, _ = interpret_profile_result_inference_1d(
+                profile_results, num_layers, num_submesh_choices,
+                num_autosharding_configs)
+            max_n_succ_stages = None
+        else:
+            (compute_cost,
+             max_n_succ_stages) = interpret_profile_result_training_1d(
+                 profile_results, num_layers, num_submesh_choices,
+                 num_autosharding_configs)
+    else:
+        raise ValueError(f"Unknown layer profile mode: "
+                         f"{auto_stage_option.layer_profile_mode}")
+
+    return compute_cost, max_n_succ_stages
 
 def select_module_layers(layers: Sequence[JaxPipelineComputation],
                          layer_indices: Sequence[int],

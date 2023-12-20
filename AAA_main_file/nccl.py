@@ -1,24 +1,34 @@
 import ray
-import time
+# 创建一个默认的客户端
+ray.init("ray://192.168.0.5:10001")
 
-# Get the value of one object ref.
-obj_ref = ray.put(1)
-assert ray.get(obj_ref) == 1
+# 连接到其他集群
+cli2 = ray.init(address="192.168.100.3:6103", allow_multiple=True)
 
-# Get the values of multiple object refs in parallel.
-assert ray.get([ray.put(i) for i in range(3)]) == [0, 1, 2]
+cli1 = ray.init(address="192.168.0.5:6005", allow_multiple=True)
 
-# You can also set a timeout to return early from a ``get``
-# that's blocking for too long.
-from ray.exceptions import GetTimeoutError
-# ``GetTimeoutError`` is a subclass of ``TimeoutError``.
+# 数据被放入默认的集群
+obj = ray.put("obj")
 
-@ray.remote
-def long_running_function():
-    time.sleep(8)
+with cli1:
+    obj1 = ray.put("obj1")
 
-obj_ref = long_running_function.remote()
-try:
-    ray.get(obj_ref, timeout=4)
-except GetTimeoutError:  # You can capture the standard "TimeoutError" instead
-    print("`get` timed out.")
+with cli2:
+    obj2 = ray.put("obj2")
+
+with cli1:
+    assert ray.get(obj1) == "obj1"
+    try:
+        ray.get(obj2)  # 不允许跨集群操作
+    except:
+        print("Failed to get object which doesn't belong to this cluster")
+
+with cli2:
+    assert ray.get(obj2) == "obj2"
+    try:
+        ray.get(obj1)  # 不允许跨集群操作
+    except:
+        print("Failed to get object which doesn't belong to this cluster")
+assert "obj" == ray.get(obj)
+cli1.disconnect()
+cli2.disconnect()

@@ -27,3 +27,9 @@ RUN . /opt/conda/etc/profile.d/conda.sh && \
     pip3 install cupy-cuda113 && \
     pip3 install alpa && \
     pip3 install jaxlib==0.3.22+cuda113.cudnn820 -f https://alpa-projects.github.io/wheels.html
+
+
+
+## numpy==1.20.0, numba==>???
+## numba==0.53.0, grpcio==1.60.0
+## export https_proxy=http://192.168.0.5:7890 http_proxy=http://192.168.0.5:7890 all_proxy=socks5://192.168.0.5:7890

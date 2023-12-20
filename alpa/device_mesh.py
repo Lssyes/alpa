@@ -1018,7 +1018,7 @@ class DistributedPhysicalDeviceMesh(PhysicalDeviceMesh):
             self.node_ips.append(ip)
 
         found_existing_workers = False
-        if self.namespace:
+        if self.namespace:              ####  这里是做什么的? 
             try:
                 ray.get_actor(self.get_host_worker_name(0))
                 found_existing_workers = True
@@ -2151,20 +2151,20 @@ class DeviceCluster:
                     all_host_ips.append(key.split("node:")[-1])
                     
         ######### Faker dict4 = copy.deepcopy(dict1) #深拷贝
-        all_host_ips_fake = ['192.168.0.5[0]', '192.168.0.5[1]', '192.168.0.5[2]', '192.168.0.5[3]',
-                             '192.168.0.4[0]', '192.168.0.4[1]', '192.168.0.4[2]', '192.168.0.4[3]']
-        import copy
-        all_host_info_fake = [copy.deepcopy(all_host_info[0]),
-                              copy.deepcopy(all_host_info[0]),
-                              copy.deepcopy(all_host_info[0]),
-                              copy.deepcopy(all_host_info[0]),
-                              copy.deepcopy(all_host_info[1]),
-                              copy.deepcopy(all_host_info[1]),
-                              copy.deepcopy(all_host_info[1]),
-                              copy.deepcopy(all_host_info[1])]
+        # all_host_ips_fake = ['192.168.0.5[0]', '192.168.0.5[1]', '192.168.0.5[2]', '192.168.0.5[3]',
+        #                      '192.168.0.4[0]', '192.168.0.4[1]', '192.168.0.4[2]', '192.168.0.4[3]']
+        # import copy
+        # all_host_info_fake = [copy.deepcopy(all_host_info[0]),
+        #                       copy.deepcopy(all_host_info[0]),
+        #                       copy.deepcopy(all_host_info[0]),
+        #                       copy.deepcopy(all_host_info[0]),
+        #                       copy.deepcopy(all_host_info[1]),
+        #                       copy.deepcopy(all_host_info[1]),
+        #                       copy.deepcopy(all_host_info[1]),
+        #                       copy.deepcopy(all_host_info[1])]
         
-        for i, host_info in enumerate(all_host_info_fake):
-            host_info["NodeManagerAddress"] = all_host_ips_fake[i]
+        # for i, host_info in enumerate(all_host_info_fake):
+        #     host_info["NodeManagerAddress"] = all_host_ips_fake[i]
             
         # all_host_ips = all_host_ips_fake
         # all_host_info = all_host_info_fake
@@ -2328,18 +2328,176 @@ class DeviceCluster:
         this cluster."""
         return mesh_profiling.profile_all(self, *args, **kwargs)
 
+    def get_sub_cluster(self, device_ids):
+        
+        global_sub_cluster_0 = SubDeviceCluster(device_ids[0], 0, 
+                                                self.head_info, self.host_info, self.host_ips, 2,
+                                                "sub0", self.placement_group)
+        global_sub_cluster_1 = SubDeviceCluster(device_ids[1], 1, 
+                                                self.head_info, self.host_info, self.host_ips, 2,
+                                                "sub1")
+        return (global_sub_cluster_0, global_sub_cluster_1)
+
+
+class SubDeviceCluster:
+    ## 一个 DeviceCluster 应该有什么?  
+    # self.head_info, self.host_num_devices, self.namespace, self.placement_group, self.host_info, self.host_ips
+    # 还应该有什么方法？
+    # delete_placement_group, get_physical_mesh, get_virtual_physical_mesh, profile_all
+    # 还应该有什么 property？
+    # num_cpus,  num_devices, num_hosts
+    
+    # 感觉应该有个placement_group 翻译算法
+    # 还应该有个抽象层，抽象异构gpu
+    
+    def __init__(self,
+                 device_id: list = None,
+                 subDeviceCluster_idx: int = None,
+                 headinfo: Any = None,
+                 all_host_info: list = None, 
+                 all_host_ips: list = None,
+                 num_device_per_host: int = None,
+                 namespace: Optional[str] = None,
+                 global_pg: Any = None):
+
+        # call side
+        # -----
+        # __init__ side
+        ## self.headinfo
+        self.head_info = headinfo
+        self.GPU_type = 'A100' if subDeviceCluster_idx == 0 else 'H100'
+        
+        ## host_info, host_ips, host_num_devices
+        
+        self.host_info = []
+        self.host_ips = []
+        self.host_num_devices = []
+        for i in range(len(device_id)):
+            # 检测 subCluster 形状
+            assert len(device_id[i]) == num_device_per_host or len(device_id[i]) == 0, \
+                "只支持 N x M 类型的 subCluster"
+            # 放入 ips info, num
+            if(len(device_id[i]) != 0): # 说明这个host是这个subcluster里面的
+                self.host_ips.append(all_host_ips[i])
+                self.host_info.append(all_host_info[i])
+                self.host_num_devices.append(num_device_per_host)
+
+                
+        ## namespace
+        self.namespace = namespace
+        
+        ## GPUTYPE
+        for resource in self.host_info[0]["Resources"]:
+            if resource.startswith("accelerator_type"):
+                self.gpu_type = resource[17:]
+                break
+            
+        ## placement_grouP???
+        
+        
+        self.placement_group = global_pg
+        pass
+    
+    
+    @property
+    def num_cpus(self):
+        return sum(
+            map(lambda info: int(info["Resources"]["CPU"]), self.host_info))
+
+    @property
+    def num_devices(self):
+        return sum(self.host_num_devices)
+
+    @property
+    def num_hosts(self):
+        return len(self.host_info)
+    
+    
+    def create_sub_pg(self):
+        if self.GPU_type == 'A100':
+            additional_resources_per_host = {"cluster_A100": 1}
+        else:
+            additional_resources_per_host = {"cluster_H100": 1}
+            
+        
+        bundles = [{
+            "CPU": 1,
+            "GPU": self.host_num_devices[i],
+            **additional_resources_per_host
+        } for i in range(self.num_hosts)]
+            
+        name = self.GPU_type
+        
+        # Alpa Placement Group: `SPREAD` strategy is required
+        # https://docs.ray.io/en/latest/ray-core/placement-group.html#strategy-types
+        # Each bundle must be scheduled in a separate node.
+        strategy = "SPREAD"
+        placement_group = ray.util.placement_group(bundles,
+                                                strategy=strategy,
+                                                name=name or "")
+        logger.debug("Waiting for placement group to start.")
+        
+        from alpa.util import env_integer
+        timeout = env_integer("ALPA_PLACEMENT_GROUP_TIMEOUT_S_ENV", 10)
+        ready, _ = ray.wait([placement_group.ready()], timeout=timeout)
+        if ready:
+            logger.debug("Placement group has started.")
+        else:
+            raise TimeoutError(
+                "Placement group creation timed out. Make sure your "
+                "cluster either has enough resources or use an "
+                "autoscaling cluster. If you are running on a cluster, "
+                "make sure you specify an address in `ray.init()`, for example,"
+                ' `ray.init("auto")`. You can also increase the timeout by '
+                "setting the ALPA_PLACEMENT_GROUP_TIMEOUT_S environment "
+                "variable. Current resources available: "
+                f"{ray.available_resources()}, resources requested by "
+                f"the placement group: {placement_group.bundle_specs}")
+        return placement_group
+
+    
+    def get_virtual_physical_mesh(self,
+                                  host_ids: Sequence[int] = None,
+                                  num_devices_per_host: int = None):
+        """
+        Slice a subset of hosts and devices to form a virtual physical mesh.
+
+        virtual 和 physical mesh  之间的唯一区别就是 virtual mesh 不 request cluster resources.
+        """
+        # 原来的代码
+        host_ids = host_ids or np.arange(len(self.host_info))
+        host_info = [self.host_info[x] for x in host_ids]
+        num_devices_per_host = num_devices_per_host or self.host_num_devices[host_ids[0]]
+        for host_id in host_ids:
+            assert self.host_num_devices[host_id] >= num_devices_per_host
+
+
+        return VirtualPhysicalMesh(host_ids=host_ids,
+                                   host_info=host_info,
+                                   num_devices_per_host=num_devices_per_host,
+                                   parent=self)
+
+    
 
 # Global runtime objects
 global_cluster: DeviceCluster = None
 global_physical_mesh: PhysicalDeviceMesh = None
 global_virtual_physical_mesh: VirtualPhysicalMesh = None
 
+global_sub_cluster_0: SubDeviceCluster = None
+global_sub_cluster_1: SubDeviceCluster = None
+global_physical_mesh_0: PhysicalDeviceMesh = None
+global_physical_mesh_1: PhysicalDeviceMesh = None
+global_virtual_physical_mesh_0: VirtualPhysicalMesh = None
+global_virtual_physical_mesh_1: VirtualPhysicalMesh = None
+global_cluster_num: int = None
 
 def init_global_cluster(cluster: str,
-                        cluster_address: Optional[str] = None,
+                        cluster_address: Optional[str or Sequence[str]] = None,
                         num_nodes: Optional[int] = None,
                         num_devices_per_node: Optional[int] = None,
-                        namespace: Optional[str] = None):
+                        namespace: Optional[str] = None,
+                        cluster_num: Optional[int] = None):
     global global_cluster, global_physical_mesh, global_virtual_physical_mesh
     if cluster == "local":
         global_physical_mesh = LocalPhysicalDeviceMesh()
@@ -2353,19 +2511,94 @@ def init_global_cluster(cluster: str,
             print(context.dashboard_url)
         update_jax_platform("cpu")
         global_cluster = DeviceCluster(num_nodes, num_devices_per_node)
-        global_virtual_physical_mesh = (global_cluster.get_virtual_physical_mesh())
         
         
-        ## printf i1nformation ray 集群
-        rp.rainbow_debug("-=-=-=-=-=-=-=- Ray info start --=-=-=-=-=-=-=-=-")
-        rp.rainbow_debug(f"Head -> {global_cluster.head_info['gcs_address']}, physical_DeviceMesh: {global_cluster.host_num_devices}")
-        for idx in range(global_cluster.num_hosts):
-            node = global_cluster.host_info[idx]
-            rp.rainbow_info(f"host_ip: {node['NodeManagerAddress']}")
-            for res in node["Resources"]:
-                print(f"\t[{res}]:  {node['Resources'][res]}")
-        rp.rainbow_debug("-=-=-=-=-=-=-=- Ray info end  --=-=-=-=-=-=-=-=-\n\n\n")
+        if cluster_num: #### 异构改进
+            global global_sub_cluster_0, global_sub_cluster_1
+            # global global_physical_mesh_0, global_physical_mesh_1
+            global global_virtual_physical_mesh_0, global_virtual_physical_mesh_1
+            global global_cluster_num
+            device_ids = [[[0,1],[]], 
+                        [[],[0,1]]]
+            
+            global_cluster_num = cluster_num
+            global_sub_cluster_0, global_sub_cluster_1 = global_cluster.get_sub_cluster(device_ids)
+            global_virtual_physical_mesh_0 = global_sub_cluster_0.get_virtual_physical_mesh()
+            global_virtual_physical_mesh_1 = global_sub_cluster_1.get_virtual_physical_mesh()
+            
+            
+        # # def get_physical_mesh(self, mesh_id: int = 0):
+        #     """Launch a physical mesh (which will request resources from Ray)."""
+
+        #     test_launched_physical_mesh = DistributedPhysicalDeviceMesh(
+        #         host_ids=global_virtual_physical_mesh_0.host_ids,
+        #         host_info=global_virtual_physical_mesh_0.host_info,
+        #         num_devices_per_host=global_virtual_physical_mesh_0.num_devices_per_host,
+        #         parent=global_virtual_physical_mesh_0,
+        #         devices=global_virtual_physical_mesh_0.devices,
+        #         mesh_id=0)
+        #     # return self.launched_physical_mesh
+                
+                
+            
+            print()
         
+        
+            ## printf i1nformation ray 集群
+            rp.rainbow_debug("-=-=-=-=-=-=-=- Ray info start paper fake --=-=-=-=-=-=-=-=-")
+            print()
+            rp.rainbow_error(f"SubCluster-1:\n"
+                            f"Head -> {global_sub_cluster_0.head_info['gcs_address']}, " 
+                            f"physical_DeviceMesh: {global_sub_cluster_0.host_num_devices}")
+            for idx in range(global_sub_cluster_0.num_hosts):
+                node = global_sub_cluster_0.host_info[idx]
+                rp.rainbow_info(f"host_ip: {node['NodeManagerAddress']}")
+                for res in node["Resources"]:
+                    print(f"\t[{res}]:  {node['Resources'][res]}")
+            rp.rainbow_debug("-=-=-=-=-=-=-=- Ray info next  --=-=-=-=-=-=-=-=-")
+            rp.rainbow_error(f"SubCluster-2:\n"
+                             f"Head -> {global_sub_cluster_1.head_info['gcs_address']}, " 
+                             f"physical_DeviceMesh: {global_sub_cluster_1.host_num_devices}")
+            for idx in range(global_sub_cluster_1.num_hosts):
+                node = global_sub_cluster_1.host_info[idx]
+                rp.rainbow_info(f"host_ip: {node['NodeManagerAddress']}")
+                for res in node["Resources"]:
+                    print(f"\t[{res}]:  {node['Resources'][res]}")
+            rp.rainbow_debug("-=-=-=-=-=-=-=- Ray info end  --=-=-=-=-=-=-=-=-\n")
+            
+            for host in global_cluster.host_info:
+                rp.rainbow_error(f"ip: {host['NodeManagerAddress']}, \t gpu: : {host['Resources']['GPU']}")
+            rp.rainbow_error(str(device_ids[0])+"\t"+ str(device_ids[1]))
+            
+        else:## raw alpa
+            global_virtual_physical_mesh = (global_cluster.get_virtual_physical_mesh())
+            rp.rainbow_debug("-=-=-=-=-=-=-=- Ray info start row alpa --=-=-=-=-=-=-=-=-")
+            print()
+            rp.rainbow_error(f"Head -> {global_cluster.head_info['gcs_address']}, " 
+                             f"physical_DeviceMesh: {global_cluster.host_num_devices}")
+            for idx in range(global_cluster.num_hosts):
+                node = global_cluster.host_info[idx]
+                rp.rainbow_info(f"host_ip: {node['NodeManagerAddress']}")
+                for res in node["Resources"]:
+                    print(f"\t[{res}]:  {node['Resources'][res]}")
+            rp.rainbow_debug("-=-=-=-=-=-=-=- Ray info end  --=-=-=-=-=-=-=-=-")
+            
+
+def get_global_sub_cluster(sub_idx: int = None):
+    global global_sub_cluster_0, global_sub_cluster_1
+    if sub_idx == 0:
+        return global_sub_cluster_0
+    elif sub_idx == 1:
+        return global_sub_cluster_1
+    else:
+        assert False
+            
+
+def get_global_paper_type():
+    if global_cluster_num is not None:
+        return "paper"
+    else:
+        return "raw_alpa"
 
 
 def shutdown_global_cluster():
@@ -2413,13 +2646,20 @@ def get_global_physical_mesh(create_if_not_exist=False):
     return global_physical_mesh
 
 
-def set_global_virtual_physical_mesh(mesh: VirtualPhysicalMesh):
-    global global_virtual_physical_mesh
-    global_virtual_physical_mesh = mesh
+def set_global_virtual_physical_mesh(mesh: VirtualPhysicalMesh or list):
+    if global_cluster_num is not None: # subcluster模式
+        global global_virtual_physical_mesh_0, global_virtual_physical_mesh_1
+        global_virtual_physical_mesh_0, global_virtual_physical_mesh_1 = mesh[0], mesh[1]
+    else:
+        global global_virtual_physical_mesh
+        global_virtual_physical_mesh = mesh
 
 
 def get_global_virtual_physical_mesh():
-    return global_virtual_physical_mesh
+    if global_cluster_num is not None: # subcluster模式
+        return [global_virtual_physical_mesh_0, global_virtual_physical_mesh_1]
+    else:
+        return global_virtual_physical_mesh
 
 
 def set_seed(seed: int):

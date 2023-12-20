@@ -235,7 +235,7 @@ class PipeshardParallel(ParallelMethod):
         else:
             mesh = self.devices
 
-        assert isinstance(mesh, VirtualPhysicalMesh)
+        assert isinstance(mesh, (VirtualPhysicalMesh, list))
 
         return compile_pipeshard_executable(
             fun, in_tree, out_tree_thunk, static_argnums, donated_invars,

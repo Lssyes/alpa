@@ -30,7 +30,8 @@ def init(cluster: str = "ray",
          cluster_address: Optional[str] = None,
          num_nodes: Optional[int] = None,
          num_devices_per_node: Optional[int] = None,
-         namespace: Optional[str] = "alpa_default_space"):
+         namespace: Optional[str] = "alpa_default_space",
+         cluster_num: Optional[int] = None):
     """Initialize the global environment.
 
     `devices_per_node, num_nodes` are used to specify the number of devices.
@@ -62,7 +63,7 @@ def init(cluster: str = "ray",
     is_initialized = True
 
     init_global_cluster(cluster, cluster_address, num_nodes,
-                        num_devices_per_node, namespace)
+                        num_devices_per_node, namespace, cluster_num)
 
 
 def shutdown():
