@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  workflow_run:
+    workflows: [Build Jaxlib and Jax]
+    types:
+      - completed
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  yapf:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.7"]
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install yapf==0.32.0
+    - name: Running yapf
+      run: |
+        yapf --diff --style .style.yapf --recursive alpa && yapf --diff --style .style.yapf --recursive tests
+
+  pylint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.7"]
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pylint==2.14.0
+    - name: Analysing the code with pylint
+      run: |
+        pylint alpa
+
+  Unittest:
+    runs-on: [self-hosted, gpu]
+    needs: [yapf, pylint]
+    steps:
+      - name: Cancel previous
+        uses: styfle/cancel-workflow-action@0.9.1
+        with:
+          access_token: ${{ secrets.PAT_TOKEN }}
+        if: |
+          github.event_name =='pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+
+      - uses: actions/checkout@v3
+
+      - name: clean up images
+        run: |
+          docker image prune -f
+
+      - name: build test image
+        run: |
+          docker build -t test-alpa-image -f docker/unittest.Dockerfile docker/
+
+      - name: Test
+        run: |
+          ALPA_BRANCH=${{ github.ref }}
+          echo "${ALPA_BRANCH}"
+          
+          docker run --gpus all --tmpfs /build:exec --rm \
+          -v /data/alpa-dist:/alpa-dist \
+          --shm-size=10.24gb test-alpa-image 3.8 ${ALPA_BRANCH}

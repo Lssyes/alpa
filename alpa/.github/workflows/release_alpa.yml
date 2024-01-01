@@ -1,0 +1,58 @@
+name: Release Alpa
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+
+env:
+  TWINE_USERNAME: "__token__"
+  TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+
+jobs:
+
+  build-image:
+    runs-on: [self-hosted]
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: clean up images
+        run: |
+          docker image prune -f
+
+      - name: build docker image
+        run: |
+          docker build -t build-alpa-image -f docker/build_alpa.Dockerfile docker/
+
+  release-alpa:
+    runs-on: [self-hosted]
+    needs: [build-image]
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Build Alpa wheels
+        run: |
+          mkdir -p dist
+          docker run --gpus all --tmpfs /build:exec \
+          --rm -v $(pwd)/dist:/dist --entrypoint /build_alpa.sh \
+          build-alpa-image 3.8 ${ALPA_BRANCH}
+        env:
+          ALPA_BRANCH: ${{ github.ref }}
+
+      - name: Set up Python 3.8
+        uses: actions/setup-python@v3
+        with:
+          python-version: 3.8
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install twine
+
+      - name: Publish to Pypi
+        run: |
+          echo "Publish to PyPI"
+          ls -ltr dist/
+          python -m twine upload --verbose dist/*

@@ -1,0 +1,17 @@
+for 1 ≤ i ≤ j ≤ L do:  '# O(k^2) '
+    stage ← (li, . . . , l j)   
+    for (n, m) ∈ submesh_shapes do   '# O(Log2(M)+N) '
+        for s from 1 to L do         '# O(K)'
+            t_intra(stage, Mesh(n, m), s) ← ∞     '# 所以这里初始化对于不同s的t_intra的时间复杂度是 O(k^3·(log2(M)+N))'
+        end for 
+        for (nl, ml), opt ∈ LogicalMeshShapeAndIntraOp Options(n, m) do   '最疑惑的是这里的时间复杂度?'
+            plan ← IntraOpPass(stage, Mesh(nl, ml), opt)               
+            tl, memstage, memact ← Profile(plan) 
+            for s satisfies Eq. 5 do      '# O(k)'                      
+                if tl < t_intra(stage, Mesh(n, m), s) then 
+                    t_intra(stage, Mesh(n, m), s) ← tl 
+                end if
+            end for
+        end for
+    end for 
+end for

@@ -12,8 +12,8 @@ import ray
 from alpa.util import benchmark_func, trace_jaxpr_with_micro_batch, print_jaxpr_computation_graph
 
 # alpa.util.disable_tqdm_globally()
-# a = alpa.init(cluster="ray")
-a = alpa.init(cluster="ray", cluster_num=3)
+a = alpa.init(cluster="ray")
+# a = alpa.init(cluster="ray", cluster_num=2)
 
 # python 中，不同的ray集群如何通信
 
@@ -26,10 +26,8 @@ class MaunulModelPipeline(nn.Module):
         x = nn.Dense(features=self.hidden_dim)(x)
         x = nn.Dense(features=self.hidden_dim)(x)
         x = nn.Dense(features=self.hidden_dim)(x)
-        x = nn.Dense(features=self.hidden_dim)(x)
-        x = nn.Dense(features=self.hidden_dim)(x)
-        # for _ in range(128):
-        #     x = nn.Dense(features=self.hidden_dim)(x)
+        for _ in range(128):
+            x = nn.Dense(features=self.hidden_dim)(x)
         # # x = nn.relu(x)
         # x = nn.Dense(features=self.hidden_dim)(x)
         # # x = nn.relu(x)
@@ -88,7 +86,7 @@ state = TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
 
 @alpa.parallelize(method=alpa.PipeshardParallel(num_micro_batches=16,
-                                                layer_option=alpa.AutoLayerOption(layer_num=6),
+                                                layer_option=alpa.AutoLayerOption(layer_num=32),
                                                 stage_option="auto"))
 def MaunulModelPipeline_TrainStep(state, batch):
     def loss(params):

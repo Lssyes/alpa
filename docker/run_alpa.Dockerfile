@@ -32,4 +32,6 @@ RUN . /opt/conda/etc/profile.d/conda.sh && \
 
 ## numpy==1.20.0, numba==>???
 ## numba==0.53.0, grpcio==1.60.0
+## pip install RainbowPrint==0.0.1 -i https://pypi.org/simple
+
 ## export https_proxy=http://192.168.0.5:7890 http_proxy=http://192.168.0.5:7890 all_proxy=socks5://192.168.0.5:7890
